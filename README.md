@@ -1,11 +1,13 @@
 # Piko
 
-Minimal self-blocking tool for Linux (Fedora-focused).
+Piko is a Linux website blocker for focused work sessions.
 
-Piko blocks domains using:
-- `/etc/hosts` entries (`# piko:` tags) + `chattr +i`
-- browser managed policies (Firefox `WebsiteFilter`, Chrome/Chromium `URLBlocklist`)
-- systemd watchdog (`piko-watchdog.timer`) every 60s
+It blocks sites using:
+- `/etc/hosts` rules
+- Firefox/Chrome managed policies
+- a systemd watchdog timer
+
+This is a high-friction tool, not a guaranteed lockout if full root control is available.
 
 ## Install
 
