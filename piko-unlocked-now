@@ -1,0 +1,68 @@
+#!/bin/bash
+set -euo pipefail
+
+HOSTS=/etc/hosts
+STATE_DIR=/var/lib/piko
+UNLOCK_FILE="$STATE_DIR/unlock_at"
+LAST_UNLOCK_FILE="$STATE_DIR/last_unlock_at"
+
+FIREFOX_POLICY_FILE=/etc/firefox/policies/policies.json
+CHROME_POLICY_FILE=/etc/opt/chrome/policies/managed/piko-blocklist.json
+CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/piko-blocklist.json
+
+browser_names=(
+    firefox
+    firefox-bin
+    google-chrome
+    google-chrome-stable
+    chromium
+    chromium-browser
+)
+
+browser_restart_required() {
+    [ -f "$LAST_UNLOCK_FILE" ] || return 1
+    local last_unlock
+    last_unlock=$(cat "$LAST_UNLOCK_FILE")
+    local now
+    now=$(date +%s)
+
+    local pids
+    pids=$(for name in "${browser_names[@]}"; do pgrep -x "$name" 2>/dev/null || true; done | sort -u)
+    [ -z "$pids" ] && return 1
+
+    while IFS= read -r pid; do
+        [ -z "$pid" ] && continue
+        local etimes
+        etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{print $1}')
+        [ -z "$etimes" ] && continue
+        local started
+        started=$(( now - etimes ))
+        if [ "$started" -lt "$last_unlock" ]; then
+            return 0
+        fi
+    done <<< "$pids"
+
+    return 1
+}
+
+if [ -f "$UNLOCK_FILE" ]; then
+    echo "unlocked-now: no (active block session)"
+    exit 1
+fi
+
+if grep -q '# piko:' "$HOSTS" 2>/dev/null; then
+    echo "unlocked-now: no (hosts entries still present)"
+    exit 2
+fi
+
+if [ -f "$FIREFOX_POLICY_FILE" ] || [ -f "$CHROME_POLICY_FILE" ] || [ -f "$CHROMIUM_POLICY_FILE" ]; then
+    echo "unlocked-now: no (browser policy files still present)"
+    exit 3
+fi
+
+if browser_restart_required; then
+    echo "unlocked-now: no (restart browser to refresh policy state)"
+    exit 4
+fi
+
+echo "unlocked-now: yes"

@@ -1,0 +1,48 @@
+#!/bin/bash
+HOSTS=/etc/hosts
+UNLOCK_FILE=/var/lib/piko/unlock_at
+REQUEST_FILE=/var/lib/piko/request_unlock_at
+DOMAINS_FILE=/var/lib/piko/domains
+
+[ ! -f "$UNLOCK_FILE" ] && exit 0
+
+UNLOCK_AT=$(cat "$UNLOCK_FILE")
+NOW=$(date +%s)
+
+REQUEST_AT=0
+if [ -f "$REQUEST_FILE" ]; then
+    REQUEST_AT=$(cat "$REQUEST_FILE")
+fi
+
+SHOULD_UNLOCK=0
+if [ "$NOW" -ge "$UNLOCK_AT" ]; then
+    SHOULD_UNLOCK=1
+fi
+if [ "$REQUEST_AT" -gt 0 ] && [ "$NOW" -ge "$REQUEST_AT" ]; then
+    SHOULD_UNLOCK=1
+fi
+
+if [ "$SHOULD_UNLOCK" -eq 1 ]; then
+    chattr -i "$HOSTS"
+    sed -i '/# piko:/d' "$HOSTS"
+    rm -f "$UNLOCK_FILE"
+    rm -f "$REQUEST_FILE"
+    rm -f "$DOMAINS_FILE"
+    /usr/local/bin/piko-browser-guard clear 2>/dev/null || true
+    /usr/local/bin/piko-browser-cycle unlock 2>/dev/null || true
+    systemctl try-restart systemd-resolved 2>/dev/null || true
+    logger "Piko: session ended, hosts file unblocked"
+else
+    chattr -i "$HOSTS" 2>/dev/null || true
+    if [ -f "$DOMAINS_FILE" ]; then
+        while IFS= read -r domain; do
+            [ -z "$domain" ] && continue
+            grep -q "# piko:${domain}:ipv4" "$HOSTS" || \
+                echo "127.0.0.1 $domain www.$domain # piko:${domain}:ipv4" >> "$HOSTS"
+            grep -q "# piko:${domain}:ipv6" "$HOSTS" || \
+                echo "::1 $domain www.$domain # piko:${domain}:ipv6" >> "$HOSTS"
+        done < "$DOMAINS_FILE"
+    fi
+    /usr/local/bin/piko-browser-guard apply 2>/dev/null || true
+    chattr +i "$HOSTS"
+fi

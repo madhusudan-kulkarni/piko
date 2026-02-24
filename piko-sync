@@ -1,0 +1,99 @@
+#!/bin/bash
+set -euo pipefail
+
+HOSTS=/etc/hosts
+STATE_DIR=/var/lib/piko
+UNLOCK_FILE="$STATE_DIR/unlock_at"
+REQUEST_FILE="$STATE_DIR/request_unlock_at"
+LAST_UNLOCK_FILE="$STATE_DIR/last_unlock_at"
+
+FIREFOX_POLICY_FILE=/etc/firefox/policies/policies.json
+CHROME_POLICY_FILE=/etc/opt/chrome/policies/managed/piko-blocklist.json
+CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/piko-blocklist.json
+
+browser_names=(
+    firefox
+    firefox-bin
+    google-chrome
+    google-chrome-stable
+    chromium
+    chromium-browser
+)
+
+count_browser_pids() {
+    local count=0
+    local pids
+    pids=$(for name in "${browser_names[@]}"; do pgrep -x "$name" 2>/dev/null || true; done | sort -u)
+    if [ -n "$pids" ]; then
+        count=$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l)
+    fi
+    echo "$count"
+}
+
+browser_restart_required() {
+    [ -f "$LAST_UNLOCK_FILE" ] || return 1
+    local last_unlock
+    last_unlock=$(cat "$LAST_UNLOCK_FILE")
+    local now
+    now=$(date +%s)
+
+    local pids
+    pids=$(for name in "${browser_names[@]}"; do pgrep -x "$name" 2>/dev/null || true; done | sort -u)
+    [ -z "$pids" ] && return 1
+
+    while IFS= read -r pid; do
+        [ -z "$pid" ] && continue
+        local etimes
+        etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{print $1}')
+        [ -z "$etimes" ] && continue
+        local started
+        started=$(( now - etimes ))
+        if [ "$started" -lt "$last_unlock" ]; then
+            return 0
+        fi
+    done <<< "$pids"
+
+    return 1
+}
+
+ACTIVE_SESSION=0
+[ -f "$UNLOCK_FILE" ] && ACTIVE_SESSION=1
+
+HOSTS_COUNT=$(grep -c '# piko:' "$HOSTS" 2>/dev/null || true)
+
+POLICY_PRESENT=0
+[ -f "$FIREFOX_POLICY_FILE" ] && POLICY_PRESENT=1
+[ -f "$CHROME_POLICY_FILE" ] && POLICY_PRESENT=1
+[ -f "$CHROMIUM_POLICY_FILE" ] && POLICY_PRESENT=1
+
+REQUEST_PENDING=0
+[ -f "$REQUEST_FILE" ] && REQUEST_PENDING=1
+
+BROWSER_COUNT=$(count_browser_pids)
+
+echo "Piko sync report"
+echo "session_active: $ACTIVE_SESSION"
+echo "hosts_entries: $HOSTS_COUNT"
+echo "policy_files_present: $POLICY_PRESENT"
+echo "delayed_unlock_request: $REQUEST_PENDING"
+echo "browser_processes: $BROWSER_COUNT"
+
+if [ "$ACTIVE_SESSION" -eq 1 ] && { [ "$HOSTS_COUNT" -eq 0 ] || [ "$POLICY_PRESENT" -eq 0 ]; }; then
+    echo "state: drift detected (active session but enforcement missing parts)"
+    echo "action: sudo /usr/local/bin/piko-watchdog"
+    exit 1
+fi
+
+if [ "$ACTIVE_SESSION" -eq 0 ] && { [ "$HOSTS_COUNT" -gt 0 ] || [ "$POLICY_PRESENT" -eq 1 ]; }; then
+    echo "state: stale lock artifacts detected"
+    echo "action: su - then piko-unblock"
+    exit 1
+fi
+
+if [ "$ACTIVE_SESSION" -eq 0 ] && browser_restart_required; then
+    echo "state: unlocked but browser restart required"
+    echo "action: restart Firefox/Chrome"
+    exit 2
+fi
+
+echo "state: consistent"

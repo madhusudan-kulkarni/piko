@@ -1,0 +1,36 @@
+#!/bin/bash
+UNLOCK_FILE=/var/lib/piko/unlock_at
+REQUEST_FILE=/var/lib/piko/request_unlock_at
+
+if [ ! -f "$UNLOCK_FILE" ]; then
+    echo "No active block session."
+    exit 0
+fi
+
+UNLOCK_AT=$(cat "$UNLOCK_FILE")
+NOW=$(date +%s)
+REMAINING=$(( UNLOCK_AT - NOW ))
+
+if [ "$REMAINING" -le 0 ]; then
+    echo "Block session expired (watchdog will clean up within 60s)."
+else
+    echo "Blocked for ${REMAINING}s more (unlocks at $(date -d @$UNLOCK_AT))"
+fi
+
+if [ -f "$REQUEST_FILE" ]; then
+    REQUEST_AT=$(cat "$REQUEST_FILE")
+    REQUEST_REMAINING=$(( REQUEST_AT - NOW ))
+    if [ "$REQUEST_REMAINING" -le 0 ]; then
+        echo "Delayed unlock request is due now; watchdog will process within 60s."
+    else
+        echo "Delayed unlock requested: ${REQUEST_REMAINING}s left (at $(date -d @$REQUEST_AT))"
+    fi
+fi
+
+if [ -f /etc/firefox/policies/policies.json ] || [ -f /etc/opt/chrome/policies/managed/piko-blocklist.json ] || [ -f /etc/chromium/policies/managed/piko-blocklist.json ]; then
+    echo "Browser guard policy files: present"
+fi
+
+echo ""
+echo "Currently blocked domains:"
+grep "# piko:" /etc/hosts | awk -F '# piko:' '{print $2}' | awk -F ':' '{print $1}' | sort -u

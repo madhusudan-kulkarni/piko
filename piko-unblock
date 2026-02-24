@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+HOSTS=/etc/hosts
+UNLOCK_FILE=/var/lib/piko/unlock_at
+REQUEST_FILE=/var/lib/piko/request_unlock_at
+DOMAINS_FILE=/var/lib/piko/domains
+
+[ "$EUID" -ne 0 ] && { echo "Must run as root (use: su -)"; exit 1; }
+
+chattr -i "$HOSTS"
+sed -i '/# piko:/d' "$HOSTS"
+rm -f "$UNLOCK_FILE"
+rm -f "$REQUEST_FILE"
+rm -f "$DOMAINS_FILE"
+/usr/local/bin/piko-browser-guard clear 2>/dev/null || true
+/usr/local/bin/piko-browser-cycle unlock 2>/dev/null || true
+systemctl try-restart systemd-resolved 2>/dev/null || true
+echo "Unblocked."

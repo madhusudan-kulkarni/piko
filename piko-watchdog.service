@@ -1,0 +1,6 @@
+[Unit]
+Description=Piko Hosts Watchdog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/piko-watchdog

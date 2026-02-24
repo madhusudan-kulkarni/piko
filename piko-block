@@ -1,0 +1,54 @@
+#!/bin/bash
+set -e
+
+HOSTS=/etc/hosts
+UNLOCK_FILE=/var/lib/piko/unlock_at
+DOMAINS_FILE=/var/lib/piko/domains
+
+[ "$EUID" -ne 0 ] && exec sudo "$0" "$@"
+[ "$#" -lt 2 ] && { echo "Usage: piko-block <minutes> <domain1> [domain2...]"; exit 1; }
+
+MINUTES=$1; shift
+DOMAINS=("$@")
+
+if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -le 0 ]; then
+    echo "Minutes must be a positive integer."
+    exit 1
+fi
+
+mkdir -p /var/lib/piko
+
+chattr -i "$HOSTS" 2>/dev/null || true
+
+touch "$DOMAINS_FILE"
+
+for domain in "${DOMAINS[@]}"; do
+    domain=${domain,,}
+    domain=${domain#http://}
+    domain=${domain#https://}
+    domain=${domain%%/*}
+    domain=${domain#www.}
+
+    [ -z "$domain" ] && continue
+
+    if ! grep -qx "$domain" "$DOMAINS_FILE"; then
+        printf '%s\n' "$domain" >> "$DOMAINS_FILE"
+    fi
+
+    grep -q "# piko:${domain}:ipv4" "$HOSTS" || \
+        echo "127.0.0.1 $domain www.$domain # piko:${domain}:ipv4" >> "$HOSTS"
+    grep -q "# piko:${domain}:ipv6" "$HOSTS" || \
+        echo "::1 $domain www.$domain # piko:${domain}:ipv6" >> "$HOSTS"
+done
+
+date -d "+${MINUTES} minutes" +%s > "$UNLOCK_FILE"
+
+chattr +i "$HOSTS"
+
+/usr/local/bin/piko-browser-guard apply 2>/dev/null || true
+/usr/local/bin/piko-browser-cycle lock 2>/dev/null || true
+
+systemctl try-restart systemd-resolved 2>/dev/null || true
+
+echo "Blocked for ${MINUTES}m - unlocks at $(date -d @$(cat "$UNLOCK_FILE"))"
+echo "Browser policy guard applied; open browsers were cycled for enforcement."

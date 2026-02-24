@@ -1,0 +1,37 @@
+#!/bin/bash
+set -e
+
+UNLOCK_FILE=/var/lib/piko/unlock_at
+REQUEST_FILE=/var/lib/piko/request_unlock_at
+DEFAULT_DELAY_MINUTES=30
+
+[ "$EUID" -ne 0 ] && exec sudo "$0" "$@"
+
+DELAY_MINUTES=${1:-$DEFAULT_DELAY_MINUTES}
+if ! [[ "$DELAY_MINUTES" =~ ^[0-9]+$ ]] || [ "$DELAY_MINUTES" -le 0 ]; then
+    echo "Delay minutes must be a positive integer."
+    exit 1
+fi
+
+if [ ! -f "$UNLOCK_FILE" ]; then
+    echo "No active block session."
+    exit 0
+fi
+
+NOW=$(date +%s)
+REQUEST_AT=$(( NOW + DELAY_MINUTES * 60 ))
+
+if [ -f "$REQUEST_FILE" ]; then
+    EXISTING=$(cat "$REQUEST_FILE")
+    if [ "$REQUEST_AT" -lt "$EXISTING" ]; then
+        echo "Unlock already requested for a later time; cannot shorten cooldown."
+        echo "Pending unlock request at $(date -d @"$EXISTING")"
+        exit 1
+    fi
+fi
+
+printf '%s\n' "$REQUEST_AT" > "$REQUEST_FILE"
+systemctl start piko-watchdog.service 2>/dev/null || true
+echo "Unlock requested with ${DELAY_MINUTES}m cooldown."
+echo "Watchdog will unlock no earlier than $(date -d @"$REQUEST_AT")"
+echo "Note: unlock can take up to 60s after cooldown due to watchdog interval."

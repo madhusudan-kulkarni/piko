@@ -1,0 +1,214 @@
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR=/var/lib/piko
+DOMAINS_FILE="$STATE_DIR/domains"
+
+FIREFOX_POLICY_DIR=/etc/firefox/policies
+FIREFOX_POLICY_FILE="$FIREFOX_POLICY_DIR/policies.json"
+FIREFOX_BACKUP_FILE="$STATE_DIR/firefox_policies.backup"
+FIREFOX_CREATED_MARKER="$STATE_DIR/firefox_policies.created"
+
+CHROME_POLICY_FILE=/etc/opt/chrome/policies/managed/piko-blocklist.json
+CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/piko-blocklist.json
+
+usage() {
+    echo "Usage: piko-browser-guard <apply|clear>"
+}
+
+if [ "${EUID}" -ne 0 ]; then
+    exec sudo "$0" "$@"
+fi
+
+[ "$#" -eq 1 ] || { usage; exit 1; }
+ACTION=$1
+
+build_patterns_json() {
+    local out_file=$1
+
+    python3 - "$DOMAINS_FILE" "$out_file" <<'PY'
+import json
+import os
+import sys
+
+domains_path = sys.argv[1]
+out_file = sys.argv[2]
+
+domains = []
+seen_domains = set()
+if os.path.exists(domains_path):
+    with open(domains_path, encoding="utf-8") as f:
+        for raw in f:
+            d = raw.strip().lower()
+            if not d or d in seen_domains:
+                continue
+            seen_domains.add(d)
+            domains.append(d)
+
+patterns = []
+seen_patterns = set()
+for domain in domains:
+    for pattern in (f"*://{domain}/*", f"*://*.{domain}/*"):
+        if pattern in seen_patterns:
+            continue
+        seen_patterns.add(pattern)
+        patterns.append(pattern)
+
+payload = {
+    "URLBlocklist": patterns,
+    "URLBlacklist": patterns,
+}
+
+os.makedirs(os.path.dirname(out_file), exist_ok=True)
+tmp = out_file + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+    f.write("\n")
+os.replace(tmp, out_file)
+PY
+}
+
+apply_firefox_policy() {
+    mkdir -p "$STATE_DIR"
+    mkdir -p "$FIREFOX_POLICY_DIR"
+
+    if [ -f "$FIREFOX_POLICY_FILE" ] && [ ! -f "$FIREFOX_BACKUP_FILE" ] && [ ! -f "$FIREFOX_CREATED_MARKER" ]; then
+        cp -a "$FIREFOX_POLICY_FILE" "$FIREFOX_BACKUP_FILE"
+    fi
+
+    if [ ! -f "$FIREFOX_POLICY_FILE" ] && [ ! -f "$FIREFOX_BACKUP_FILE" ]; then
+        : > "$FIREFOX_CREATED_MARKER"
+    fi
+
+    python3 - "$FIREFOX_POLICY_FILE" "$DOMAINS_FILE" <<'PY'
+import json
+import os
+import sys
+
+policy_path = sys.argv[1]
+domains_path = sys.argv[2]
+
+domains = []
+seen_domains = set()
+if os.path.exists(domains_path):
+    with open(domains_path, encoding="utf-8") as f:
+        for raw in f:
+            d = raw.strip().lower()
+            if not d or d in seen_domains:
+                continue
+            seen_domains.add(d)
+            domains.append(d)
+
+patterns = []
+seen_patterns = set()
+for domain in domains:
+    for pattern in (f"*://{domain}/*", f"*://*.{domain}/*"):
+        if pattern in seen_patterns:
+            continue
+        seen_patterns.add(pattern)
+        patterns.append(pattern)
+
+data = {}
+if os.path.exists(policy_path):
+    try:
+        with open(policy_path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data = loaded
+    except Exception:
+        data = {}
+
+policies = data.get("policies")
+if not isinstance(policies, dict):
+    policies = {}
+
+policies["WebsiteFilter"] = {"Block": patterns}
+policies["PikoManaged"] = True
+data["policies"] = policies
+
+tmp = policy_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+os.replace(tmp, policy_path)
+PY
+}
+
+clear_firefox_policy() {
+    if [ -f "$FIREFOX_BACKUP_FILE" ]; then
+        mkdir -p "$FIREFOX_POLICY_DIR"
+        cp -a "$FIREFOX_BACKUP_FILE" "$FIREFOX_POLICY_FILE"
+        rm -f "$FIREFOX_BACKUP_FILE" "$FIREFOX_CREATED_MARKER"
+        return
+    fi
+
+    if [ -f "$FIREFOX_CREATED_MARKER" ]; then
+        rm -f "$FIREFOX_POLICY_FILE" "$FIREFOX_CREATED_MARKER"
+        return
+    fi
+
+    if [ -f "$FIREFOX_POLICY_FILE" ]; then
+        python3 - "$FIREFOX_POLICY_FILE" <<'PY'
+import json
+import os
+import sys
+
+policy_path = sys.argv[1]
+
+try:
+    with open(policy_path, encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+
+if not isinstance(data, dict):
+    sys.exit(0)
+
+policies = data.get("policies")
+if not isinstance(policies, dict):
+    sys.exit(0)
+
+policies.pop("PikoManaged", None)
+policies.pop("WebsiteFilter", None)
+
+if not policies:
+    if len(data.keys()) == 1 and "policies" in data:
+        os.remove(policy_path)
+        sys.exit(0)
+    data.pop("policies", None)
+else:
+    data["policies"] = policies
+
+tmp = policy_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+os.replace(tmp, policy_path)
+PY
+    fi
+}
+
+apply_chromium_policies() {
+    build_patterns_json "$CHROME_POLICY_FILE"
+    build_patterns_json "$CHROMIUM_POLICY_FILE"
+}
+
+clear_chromium_policies() {
+    rm -f "$CHROME_POLICY_FILE" "$CHROMIUM_POLICY_FILE"
+}
+
+case "$ACTION" in
+    apply)
+        [ -f "$DOMAINS_FILE" ] || exit 0
+        apply_firefox_policy
+        apply_chromium_policies
+        ;;
+    clear)
+        clear_firefox_policy
+        clear_chromium_policies
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

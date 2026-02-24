@@ -1,0 +1,9 @@
+[Unit]
+Description=Piko Watchdog Timer
+
+[Install]
+WantedBy=timers.target
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
