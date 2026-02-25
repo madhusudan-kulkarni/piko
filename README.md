@@ -58,7 +58,7 @@ piko-unblock                         # Emergency manual unblock (requires sudo)
 
 ## Configuration
 
-Create `~/.pikorc` to customize defaults:
+A config file is created at `~/.pikorc` during installation. Edit it to customize defaults:
 
 ```bash
 # Default duration in minutes

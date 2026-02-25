@@ -33,6 +33,14 @@ install -m 644 "$SCRIPT_DIR/piko-lib" /usr/local/bin/piko-lib
 ln -sf /usr/local/bin/piko-request-unlock /usr/local/bin/piko-request-unblock
 mkdir -p /var/lib/piko
 
+# Create user config file if it doesn't exist
+if [ ! -f "/home/${CURRENT_USERNAME}/.pikorc" ] && [ -f "$SCRIPT_DIR/piko.conf" ]; then
+    cp "$SCRIPT_DIR/piko.conf" "/home/${CURRENT_USERNAME}/.pikorc"
+    chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "/home/${CURRENT_USERNAME}/.pikorc"
+    echo "Config file created at ~/.pikorc"
+    echo "Edit it to customize default duration and add custom presets"
+fi
+
 # Install shell completions
 if [ -d "$SCRIPT_DIR/completion" ]; then
     # Bash completion
