@@ -5,14 +5,121 @@ HOSTS=/etc/hosts
 UNLOCK_FILE=/var/lib/piko/unlock_at
 DOMAINS_FILE=/var/lib/piko/domains
 
-[ "$EUID" -ne 0 ] && exec sudo "$0" "$@"
-[ "$#" -lt 2 ] && { echo "Usage: piko-block <minutes> <domain1> [domain2...]"; exit 1; }
+# Check for help flags early (before sudo)
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-l" ] || [ "${1:-}" = "--list" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    source "${SCRIPT_DIR}/piko-lib"
+    
+    if [ "${1:-}" = "-l" ] || [ "${1:-}" = "--list" ]; then
+        list_presets
+        exit 0
+    fi
+    
+    cat <<EOF
+Usage: piko-block <minutes> [options] [domains...]
 
-MINUTES=$1; shift
-DOMAINS=("$@")
+Block websites for a focused work session.
+
+Arguments:
+  minutes           Duration in minutes (required)
+  domains           Additional domains to block (optional)
+
+Options:
+  -p, --preset NAME Use preset blocklist (can be repeated)
+  -l, --list        List available presets and exit
+  -h, --help        Show this help
+
+Presets:
+  social        Instagram, Twitter, Facebook, TikTok, Reddit, LinkedIn
+  news          CNN, BBC, Hacker News, NYTimes, The Guardian
+  entertainment YouTube, Netflix, Twitch, Hulu, Disney+
+  shopping      Amazon, eBay, Etsy
+  work          Reddit, Twitter, Hacker News
+
+Examples:
+  piko-block 60 instagram.com youtube.com
+  piko-block --preset social
+  piko-block -p social -p news 90
+
+EOF
+    exit 0
+fi
+
+parse_args() {
+    PRESETS=()
+    DOMAINS=()
+    MINUTES=""
+    
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -p|--preset)
+                PRESETS+=("$2")
+                shift 2
+                ;;
+            *)
+                if [ -z "$MINUTES" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                    MINUTES="$1"
+                else
+                    DOMAINS+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$MINUTES" ]; then
+        load_config
+        MINUTES=$(get_default_duration)
+    fi
+    
+    if [ -z "$MINUTES" ]; then
+        echo "Error: duration required. Use -h for help." >&2
+        exit 1
+    fi
+}
+
+add_domains_from_preset() {
+    local preset="$1"
+    local domains
+    domains=$(get_preset_domains "$preset")
+    
+    if [ -z "$domains" ]; then
+        echo "Error: unknown preset '$preset'. Use --list to see available presets." >&2
+        exit 1
+    fi
+    
+    IFS=',' read -ra ADDR <<< "$domains"
+    for d in "${ADDR[@]}"; do
+        d=$(echo "$d" | xargs)  # trim whitespace
+        if [ -n "$d" ]; then
+            DOMAINS+=("$d")
+        fi
+    done
+}
+
+[ "$EUID" -ne 0 ] && exec sudo "$0" "$@"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/piko-lib"
+
+parse_args "$@"
+
+if [ -z "$MINUTES" ]; then
+    echo "Error: minutes required. Use -h for help." >&2
+    exit 1
+fi
 
 if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -le 0 ]; then
-    echo "Minutes must be a positive integer."
+    echo "Error: minutes must be a positive integer. Use -h for help." >&2
+    exit 1
+fi
+
+for preset in "${PRESETS[@]}"; do
+    add_domains_from_preset "$preset"
+done
+
+if [ ${#DOMAINS[@]} -eq 0 ]; then
+    echo "Error: no domains to block. Specify domains or use --preset. Use -h for help." >&2
     exit 1
 fi
 
@@ -31,7 +138,7 @@ for domain in "${DOMAINS[@]}"; do
 
     [ -z "$domain" ] && continue
 
-    if ! grep -qx "$domain" "$DOMAINS_FILE"; then
+    if ! grep -qx "$domain" "$DOMAINS_FILE" 2>/dev/null; then
         printf '%s\n' "$domain" >> "$DOMAINS_FILE"
     fi
 
@@ -50,5 +157,5 @@ chattr +i "$HOSTS"
 
 systemctl try-restart systemd-resolved 2>/dev/null || true
 
-echo "Blocked for ${MINUTES}m - unlocks at $(date -d @$(cat "$UNLOCK_FILE"))"
+echo "Blocked ${DOMAINS[*]} for ${MINUTES}m - unlocks at $(date -d @$(cat "$UNLOCK_FILE"))"
 echo "Browser policy guard applied; open browsers were cycled for enforcement."

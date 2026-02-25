@@ -10,6 +10,34 @@ FIREFOX_POLICY_FILE=/etc/firefox/policies/policies.json
 CHROME_POLICY_FILE=/etc/opt/chrome/policies/managed/piko-blocklist.json
 CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/piko-blocklist.json
 
+usage() {
+    cat <<EOF
+Usage: piko-unlocked-now [options]
+
+Check if Piko is fully unlocked (no active blocks).
+
+Exit codes:
+  0   Fully unlocked
+  1   Active block session
+  2   Hosts entries still present
+  3   Browser policy files still present
+  4   Browser restart required
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  piko-unlocked-now && echo "Free to browse!"
+  if piko-unlocked-now; then echo "Ready to focus"; fi
+
+EOF
+    exit 0
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+fi
+
 browser_names=(
     firefox
     firefox-bin

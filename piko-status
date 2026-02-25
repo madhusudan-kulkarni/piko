@@ -2,8 +2,29 @@
 UNLOCK_FILE=/var/lib/piko/unlock_at
 REQUEST_FILE=/var/lib/piko/request_unlock_at
 
+usage() {
+    cat <<EOF
+Usage: piko-status [options]
+
+Show the current blocking session status.
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  piko-status
+
+EOF
+    exit 0
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+fi
+
 if [ ! -f "$UNLOCK_FILE" ]; then
     echo "No active block session."
+    echo "Run 'piko-block 60 instagram.com' to start a session."
     exit 0
 fi
 

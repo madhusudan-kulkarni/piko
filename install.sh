@@ -28,9 +28,29 @@ install -m 755 "$SCRIPT_DIR/piko-sync" /usr/local/bin/piko-sync
 install -m 755 "$SCRIPT_DIR/piko-status" /usr/local/bin/piko-status
 install -m 755 "$SCRIPT_DIR/piko-unlocked-now" /usr/local/bin/piko-unlocked-now
 install -m 700 "$SCRIPT_DIR/piko-watchdog" /usr/local/bin/piko-watchdog
+install -m 644 "$SCRIPT_DIR/piko-lib" /usr/local/bin/piko-lib
 
 ln -sf /usr/local/bin/piko-request-unlock /usr/local/bin/piko-request-unblock
 mkdir -p /var/lib/piko
+
+# Install shell completions
+if [ -d "$SCRIPT_DIR/completion" ]; then
+    # Bash completion
+    if [ -f "$SCRIPT_DIR/completion/piko-completion.bash" ]; then
+        mkdir -p /etc/bash_completion.d
+        install -m 644 "$SCRIPT_DIR/completion/piko-completion.bash" /etc/bash_completion.d/piko
+        echo "Bash completion installed to /etc/bash_completion.d/piko"
+        echo "Source it with: source /etc/bash_completion.d/piko"
+    fi
+    
+    # Zsh completion
+    if [ -f "$SCRIPT_DIR/completion/piko-completion.zsh" ]; then
+        mkdir -p "${HOME}/.zsh/completions"
+        cp "$SCRIPT_DIR/completion/piko-completion.zsh" "${HOME}/.zsh/completions/_piko"
+        echo "Zsh completion installed to ~/.zsh/completions/_piko"
+        echo "Add to your .zshrc: fpath=(~/.zsh/completions \$fpath)"
+    fi
+fi
 
 install -m 644 "$SCRIPT_DIR/piko-watchdog.service" /etc/systemd/system/piko-watchdog.service
 install -m 644 "$SCRIPT_DIR/piko-watchdog.timer" /etc/systemd/system/piko-watchdog.timer
@@ -66,7 +86,7 @@ if sudo -l -U "$CURRENT_USERNAME" | grep -q "!/usr/bin/chattr"; then
 else
     echo "chattr sudo policy: check sudoers manually"
 fi
-ls -la /usr/local/bin/piko-block /usr/local/bin/piko-browser-cycle /usr/local/bin/piko-browser-guard /usr/local/bin/piko-request-unlock /usr/local/bin/piko-unblock /usr/local/bin/piko-sync /usr/local/bin/piko-status /usr/local/bin/piko-unlocked-now /usr/local/bin/piko-watchdog
+ls -la /usr/local/bin/piko-block /usr/local/bin/piko-browser-cycle /usr/local/bin/piko-browser-guard /usr/local/bin/piko-request-unlock /usr/local/bin/piko-unblock /usr/local/bin/piko-sync /usr/local/bin/piko-status /usr/local/bin/piko-unlocked-now /usr/local/bin/piko-watchdog /usr/local/bin/piko-lib
 ls -la /var/lib/piko/
 
 echo ""
