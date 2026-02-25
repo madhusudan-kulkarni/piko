@@ -5,16 +5,48 @@ UNLOCK_FILE=/var/lib/piko/unlock_at
 REQUEST_FILE=/var/lib/piko/request_unlock_at
 DEFAULT_DELAY_MINUTES=30
 
+usage() {
+    cat <<EOF
+Usage: piko-request-unlock [minutes]
+
+Request to unlock after a cooldown period.
+
+This allows you to request early unlock after waiting for a cooldown.
+The unlock will only happen after the cooldown expires - you cannot
+cancel or shorten it once requested.
+
+Arguments:
+  minutes         Cooldown delay in minutes (default: 30)
+
+Options:
+  -h, --help     Show this help
+
+Examples:
+  piko-request-unlock 30    # Request unlock after 30 minutes
+  piko-request-unlock      # Use default 30 minute cooldown
+
+Note: The actual unlock may take up to 60 seconds after the cooldown
+      due to the watchdog timer interval.
+
+EOF
+    exit 0
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+fi
+
 [ "$EUID" -ne 0 ] && exec sudo "$0" "$@"
 
 DELAY_MINUTES=${1:-$DEFAULT_DELAY_MINUTES}
 if ! [[ "$DELAY_MINUTES" =~ ^[0-9]+$ ]] || [ "$DELAY_MINUTES" -le 0 ]; then
-    echo "Delay minutes must be a positive integer."
+    echo "Error: minutes must be a positive integer. Use -h for help." >&2
     exit 1
 fi
 
 if [ ! -f "$UNLOCK_FILE" ]; then
     echo "No active block session."
+    echo "Run 'piko-block 60 instagram.com' to start a session."
     exit 0
 fi
 

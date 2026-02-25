@@ -6,9 +6,42 @@ UNLOCK_FILE=/var/lib/piko/unlock_at
 REQUEST_FILE=/var/lib/piko/request_unlock_at
 DOMAINS_FILE=/var/lib/piko/domains
 
-[ "$EUID" -ne 0 ] && { echo "Must run as root (use: su -)"; exit 1; }
+usage() {
+    cat <<EOF
+Usage: piko-unblock [options]
 
-chattr -i "$HOSTS"
+Emergency manual unblock - removes all blocks immediately.
+
+WARNING: This defeats the purpose of Piko's focus session.
+Only use this if there's a technical issue with the block.
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  sudo piko-unblock
+
+EOF
+    exit 0
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+fi
+
+[ "$EUID" -ne 0 ] && { echo "Error: must run as root. Use 'sudo piko-unblock' or 'su -' first." >&2; exit 1; }
+
+if [ ! -f "$UNLOCK_FILE" ]; then
+    echo "No active block session to unblock."
+    exit 0
+fi
+
+echo "WARNING: This defeats the purpose of Piko's focus session."
+echo "The block will end immediately - no cooldown, no accountability."
+read -p "Are you sure? Type 'yes' to confirm: " confirm
+[ "$confirm" != "yes" ] && echo "Aborted." && exit 1
+
+chattr -i "$HOSTS" 2>/dev/null || true
 sed -i '/# piko:/d' "$HOSTS"
 rm -f "$UNLOCK_FILE"
 rm -f "$REQUEST_FILE"

@@ -11,6 +11,32 @@ FIREFOX_POLICY_FILE=/etc/firefox/policies/policies.json
 CHROME_POLICY_FILE=/etc/opt/chrome/policies/managed/piko-blocklist.json
 CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/piko-blocklist.json
 
+usage() {
+    cat <<EOF
+Usage: piko-sync [options]
+
+Verify consistency between Piko state and enforcement mechanisms.
+Reports drift or stale lock artifacts.
+
+Options:
+  -h, --help    Show this help
+
+Exit codes:
+  0   State is consistent
+  1   Drift detected (active session but enforcement missing)
+  2   Browser restart required after unlock
+
+Examples:
+  piko-sync
+
+EOF
+    exit 0
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+fi
+
 browser_names=(
     firefox
     firefox-bin
@@ -80,13 +106,13 @@ echo "browser_processes: $BROWSER_COUNT"
 
 if [ "$ACTIVE_SESSION" -eq 1 ] && { [ "$HOSTS_COUNT" -eq 0 ] || [ "$POLICY_PRESENT" -eq 0 ]; }; then
     echo "state: drift detected (active session but enforcement missing parts)"
-    echo "action: sudo /usr/local/bin/piko-watchdog"
+    echo "action: sudo piko-watchdog"
     exit 1
 fi
 
 if [ "$ACTIVE_SESSION" -eq 0 ] && { [ "$HOSTS_COUNT" -gt 0 ] || [ "$POLICY_PRESENT" -eq 1 ]; }; then
     echo "state: stale lock artifacts detected"
-    echo "action: su - then piko-unblock"
+    echo "action: sudo piko-unblock"
     exit 1
 fi
 
