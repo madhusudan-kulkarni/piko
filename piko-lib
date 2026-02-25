@@ -14,26 +14,11 @@ load_config() {
 get_preset_domains() {
     local preset_name="$1"
     
-    case "$preset_name" in
-        social)
-            echo "instagram.com,twitter.com,facebook.com,tiktok.com,reddit.com,linkedin.com"
-            ;;
-        news)
-            echo "cnn.com,bbc.com,news.ycombinator.com,nytimes.com,theguardian.com"
-            ;;
-        entertainment)
-            echo "youtube.com,netflix.com,twitch.tv,hulu.com,disneyplus.com"
-            ;;
-        shopping)
-            echo "amazon.com,ebay.com,etsy.com"
-            ;;
-        work)
-            echo "reddit.com,twitter.com,news.ycombinator.com"
-            ;;
-        *)
-            # Try user-defined presets from config
-            if [ -n "${PIKO_PRESETS:-}" ]; then
-                python3 - "$PIKO_PRESETS" "$preset_name" 2>/dev/null <<'PY' || echo ""
+    if [ -z "${PIKO_PRESETS:-}" ]; then
+        return
+    fi
+    
+    python3 - "$PIKO_PRESETS" "$preset_name" 2>/dev/null <<'PY'
 import json
 import sys
 presets = json.loads(sys.argv[1])
@@ -41,23 +26,16 @@ name = sys.argv[2]
 if name in presets:
     print(",".join(presets[name]))
 PY
-            fi
-            ;;
-    esac
 }
 
 list_presets() {
-    echo "Built-in presets:"
-    echo "  social        - Instagram, Twitter, Facebook, TikTok, Reddit, LinkedIn"
-    echo "  news          - CNN, BBC, Hacker News, NYTimes, The Guardian"
-    echo "  entertainment - YouTube, Netflix, Twitch, Hulu, Disney+"
-    echo "  shopping      - Amazon, eBay, Etsy"
-    echo "  work          - Reddit, Twitter, Hacker News"
+    if [ -z "${PIKO_PRESETS:-}" ]; then
+        echo "No presets configured."
+        echo "Edit ~/.pikorc to add presets."
+        return
+    fi
     
-    if [ -n "${PIKO_PRESETS:-}" ]; then
-        echo ""
-        echo "User-defined presets:"
-        python3 - "$PIKO_PRESETS" 2>/dev/null <<'PY' || true
+    python3 - "$PIKO_PRESETS" 2>/dev/null <<'PY' || true
 import json
 import sys
 presets = json.loads(sys.argv[1])
@@ -67,7 +45,6 @@ for name in presets:
         domains += f" (+{len(presets[name])-3} more)"
     print(f"  {name:15} - {domains}")
 PY
-    fi
 }
 
 get_default_duration() {

@@ -46,6 +46,29 @@ piko-request-unblock [minutes]       # Alias for piko-request-unlock
 piko-unblock                         # Emergency manual unblock (requires sudo)
 ```
 
+## Configuration
+
+All settings are in `~/.pikorc` (created during install).
+
+```bash
+# Default duration in minutes
+PIKO_DEFAULT_DURATION=60
+
+# Presets (JSON format)
+PIKO_PRESETS='{
+  "social": ["instagram.com", "twitter.com", "facebook.com", "tiktok.com", "reddit.com", "linkedin.com"],
+  "news": ["cnn.com", "bbc.com", "news.ycombinator.com", "nytimes.com", "theguardian.com"],
+  "entertainment": ["youtube.com", "netflix.com", "twitch.tv", "hulu.com", "disneyplus.com"],
+  "shopping": ["amazon.com", "ebay.com", "etsy.com"],
+  "work": ["reddit.com", "twitter.com", "news.ycombinator.com"]
+}'
+```
+
+View available presets:
+```bash
+piko-block --list
+```
+
 ### Presets
 
 | Preset | Domains |
