@@ -39,6 +39,15 @@ if [ ! -f "/home/${CURRENT_USERNAME}/.pikorc" ] && [ -f "$SCRIPT_DIR/piko.conf" 
     chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "/home/${CURRENT_USERNAME}/.pikorc"
     echo "Config file created at ~/.pikorc"
     echo "Edit it to customize default duration and add custom presets"
+else
+    # Check if existing config has presets
+    if [ -f "/home/${CURRENT_USERNAME}/.pikorc" ]; then
+        if ! grep -q 'PIKO_PRESETS.*"' "/home/${CURRENT_USERNAME}/.pikorc" 2>/dev/null; then
+            echo ""
+            echo "Note: Your ~/.pikorc may be outdated."
+            echo "Copy $SCRIPT_DIR/piko.conf to ~/.pikorc for latest presets."
+        fi
+    fi
 fi
 
 # Install shell completions
