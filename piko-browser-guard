@@ -1,16 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-STATE_DIR=/var/lib/piko
-DOMAINS_FILE="$STATE_DIR/domains"
-
-FIREFOX_POLICY_DIR=/etc/firefox/policies
-FIREFOX_POLICY_FILE="$FIREFOX_POLICY_DIR/policies.json"
-FIREFOX_BACKUP_FILE="$STATE_DIR/firefox_policies.backup"
-FIREFOX_CREATED_MARKER="$STATE_DIR/firefox_policies.created"
-
-CHROME_POLICY_FILE=/etc/opt/chrome/policies/managed/piko-blocklist.json
-CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/piko-blocklist.json
+PIKO_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+PIKO_LIB_DIR="$(cd "$(dirname "$PIKO_SELF")" && pwd)"
+source "${PIKO_LIB_DIR}/piko-lib"
 
 usage() {
     echo "Usage: piko-browser-guard <apply|clear>"
@@ -26,7 +19,7 @@ ACTION=$1
 build_patterns_json() {
     local out_file=$1
 
-    python3 - "$DOMAINS_FILE" "$out_file" <<'PY'
+    python3 - "$PIKO_DOMAINS_FILE" "$out_file" <<'PY'
 import json
 import os
 import sys
@@ -69,18 +62,18 @@ PY
 }
 
 apply_firefox_policy() {
-    mkdir -p "$STATE_DIR"
-    mkdir -p "$FIREFOX_POLICY_DIR"
+    mkdir -p "$PIKO_STATE_DIR"
+    mkdir -p "$PIKO_FIREFOX_POLICY_DIR"
 
-    if [ -f "$FIREFOX_POLICY_FILE" ] && [ ! -f "$FIREFOX_BACKUP_FILE" ] && [ ! -f "$FIREFOX_CREATED_MARKER" ]; then
-        cp -a "$FIREFOX_POLICY_FILE" "$FIREFOX_BACKUP_FILE"
+    if [ -f "$PIKO_FIREFOX_POLICY_FILE" ] && [ ! -f "$PIKO_FIREFOX_BACKUP_FILE" ] && [ ! -f "$PIKO_FIREFOX_CREATED_MARKER" ]; then
+        cp -a "$PIKO_FIREFOX_POLICY_FILE" "$PIKO_FIREFOX_BACKUP_FILE"
     fi
 
-    if [ ! -f "$FIREFOX_POLICY_FILE" ] && [ ! -f "$FIREFOX_BACKUP_FILE" ]; then
-        : > "$FIREFOX_CREATED_MARKER"
+    if [ ! -f "$PIKO_FIREFOX_POLICY_FILE" ] && [ ! -f "$PIKO_FIREFOX_BACKUP_FILE" ]; then
+        : > "$PIKO_FIREFOX_CREATED_MARKER"
     fi
 
-    python3 - "$FIREFOX_POLICY_FILE" "$DOMAINS_FILE" <<'PY'
+    python3 - "$PIKO_FIREFOX_POLICY_FILE" "$PIKO_DOMAINS_FILE" <<'PY'
 import json
 import os
 import sys
@@ -135,20 +128,20 @@ PY
 }
 
 clear_firefox_policy() {
-    if [ -f "$FIREFOX_BACKUP_FILE" ]; then
-        mkdir -p "$FIREFOX_POLICY_DIR"
-        cp -a "$FIREFOX_BACKUP_FILE" "$FIREFOX_POLICY_FILE"
-        rm -f "$FIREFOX_BACKUP_FILE" "$FIREFOX_CREATED_MARKER"
+    if [ -f "$PIKO_FIREFOX_BACKUP_FILE" ]; then
+        mkdir -p "$PIKO_FIREFOX_POLICY_DIR"
+        cp -a "$PIKO_FIREFOX_BACKUP_FILE" "$PIKO_FIREFOX_POLICY_FILE"
+        rm -f "$PIKO_FIREFOX_BACKUP_FILE" "$PIKO_FIREFOX_CREATED_MARKER"
         return
     fi
 
-    if [ -f "$FIREFOX_CREATED_MARKER" ]; then
-        rm -f "$FIREFOX_POLICY_FILE" "$FIREFOX_CREATED_MARKER"
+    if [ -f "$PIKO_FIREFOX_CREATED_MARKER" ]; then
+        rm -f "$PIKO_FIREFOX_POLICY_FILE" "$PIKO_FIREFOX_CREATED_MARKER"
         return
     fi
 
-    if [ -f "$FIREFOX_POLICY_FILE" ]; then
-        python3 - "$FIREFOX_POLICY_FILE" <<'PY'
+    if [ -f "$PIKO_FIREFOX_POLICY_FILE" ]; then
+        python3 - "$PIKO_FIREFOX_POLICY_FILE" <<'PY'
 import json
 import os
 import sys
@@ -189,23 +182,25 @@ PY
 }
 
 apply_chromium_policies() {
-    build_patterns_json "$CHROME_POLICY_FILE"
-    build_patterns_json "$CHROMIUM_POLICY_FILE"
+    build_patterns_json "$PIKO_CHROME_POLICY_FILE"
+    build_patterns_json "$PIKO_CHROMIUM_POLICY_FILE"
 }
 
 clear_chromium_policies() {
-    rm -f "$CHROME_POLICY_FILE" "$CHROMIUM_POLICY_FILE"
+    rm -f "$PIKO_CHROME_POLICY_FILE" "$PIKO_CHROMIUM_POLICY_FILE"
 }
 
 case "$ACTION" in
     apply)
-        [ -f "$DOMAINS_FILE" ] || exit 0
+        [ -f "$PIKO_DOMAINS_FILE" ] || exit 0
         apply_firefox_policy
         apply_chromium_policies
+        _piko_fix_permissions
         ;;
     clear)
         clear_firefox_policy
         clear_chromium_policies
+        _piko_fix_permissions
         ;;
     *)
         usage
