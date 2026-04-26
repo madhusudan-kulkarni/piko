@@ -1,28 +1,133 @@
 #!/bin/bash
-# Piko configuration and preset loader
-# Source this file in piko scripts
+# Piko shared library — source this file in piko scripts
+# Not meant to be executed directly
+# shellcheck disable=SC2034
 
-PIKO_CONFIG="${HOME}/.pikorc"
-PIKO_STATE_DIR="/var/lib/piko"
+PIKO_VERSION="1.0.0"
+
+# --- Resolve the Piko home directory ---
+# Resolution order:
+#   1. PIKO_HOME env var (set by systemd service)
+#   2. SUDO_USER's home (when running via sudo)
+#   3. $HOME/.piko (fallback)
+_piko_resolve_home() {
+    if [ -n "${PIKO_HOME:-}" ] && [ -d "${PIKO_HOME:-}" ]; then
+        echo "$PIKO_HOME"
+        return
+    fi
+    if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" -eq 0 ]; then
+        local home
+        home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+        if [ -n "$home" ] && [ -d "$home" ]; then
+            echo "$home/.piko"
+            return
+        fi
+    fi
+    echo "$HOME/.piko"
+}
+
+PIKO_HOME="$(_piko_resolve_home)"
+
+# --- Derived paths ---
+PIKO_BIN_DIR="$PIKO_HOME/bin"
+PIKO_STATE_DIR="$PIKO_HOME/state"
+PIKO_COMPLETIONS_DIR="$PIKO_HOME/completions"
+PIKO_HOSTS="/etc/hosts"
+
+PIKO_UNLOCK_FILE="$PIKO_STATE_DIR/unlock_at"
+PIKO_REQUEST_FILE="$PIKO_STATE_DIR/request_unlock_at"
+PIKO_DOMAINS_FILE="$PIKO_STATE_DIR/domains"
+PIKO_LAST_UNLOCK_FILE="$PIKO_STATE_DIR/last_unlock_at"
+PIKO_VERSION_FILE="$PIKO_STATE_DIR/version"
+PIKO_OWNER_FILE="$PIKO_STATE_DIR/owner"
+PIKO_CONFIG="$PIKO_HOME/config"
+
+# Browser policy paths (system-level, not movable)
+PIKO_FIREFOX_POLICY_DIR="/etc/firefox/policies"
+PIKO_FIREFOX_POLICY_FILE="$PIKO_FIREFOX_POLICY_DIR/policies.json"
+PIKO_FIREFOX_BACKUP_FILE="$PIKO_STATE_DIR/firefox_policies.backup"
+PIKO_FIREFOX_CREATED_MARKER="$PIKO_STATE_DIR/firefox_policies.created"
+PIKO_CHROME_POLICY_FILE="/etc/opt/chrome/policies/managed/piko-blocklist.json"
+PIKO_CHROMIUM_POLICY_FILE="/etc/chromium/policies/managed/piko-blocklist.json"
+
+# Browser process names to detect and cycle
+PIKO_BROWSERS=(firefox firefox-bin google-chrome google-chrome-stable chromium chromium-browser)
+
+# --- Real user detection ---
+# Reads from PIKO_OWNER_FILE first (works when running via systemd with no SUDO_USER),
+# then falls back to SUDO_USER, then whoami.
+
+_piko_real_user() {
+    # 1. Owner file (written by piko block, survives systemd invocation)
+    if [ -f "$PIKO_OWNER_FILE" ]; then
+        local owner
+        owner=$(cat "$PIKO_OWNER_FILE" 2>/dev/null)
+        if [ -n "$owner" ] && getent passwd "$owner" >/dev/null 2>&1; then
+            echo "$owner"
+            return
+        fi
+    fi
+    # 2. PIKO_USER env var (set by systemd service)
+    if [ -n "${PIKO_USER:-}" ]; then
+        echo "$PIKO_USER"
+        return
+    fi
+    # 3. SUDO_USER (when running via sudo)
+    if [ -n "${SUDO_USER:-}" ]; then
+        echo "$SUDO_USER"
+    else
+        whoami
+    fi
+}
+
+_piko_real_home() {
+    local piko_user
+    piko_user=$(_piko_real_user)
+    if [ "$piko_user" != "root" ]; then
+        local home
+        home=$(getent passwd "$piko_user" 2>/dev/null | cut -d: -f6)
+        if [ -n "$home" ] && [ -d "$home" ]; then
+            echo "$home"
+            return
+        fi
+    fi
+    echo "$HOME"
+}
+
+# --- Fix file ownership after root writes ---
+# After piko commands (which run as root) write to ~/.piko/state/,
+# chown the files back to the real user so piko status (no sudo) can read them.
+
+_piko_fix_permissions() {
+    local piko_user
+    piko_user=$(_piko_real_user)
+    if [ "$piko_user" != "root" ] && [ -d "$PIKO_STATE_DIR" ]; then
+        chown "$piko_user:$piko_user" "$PIKO_STATE_DIR" 2>/dev/null || true
+        find "$PIKO_STATE_DIR" -maxdepth 1 -type f -exec chown "$piko_user:$piko_user" {} + 2>/dev/null || true
+    fi
+}
+
+# --- Config ---
 
 load_config() {
     if [ -f "$PIKO_CONFIG" ]; then
+        # shellcheck disable=SC1090
         source "$PIKO_CONFIG"
     fi
 }
 
+get_default_duration() {
+    echo "${PIKO_DEFAULT_DURATION:-60}"
+}
+
 get_preset_domains() {
     local preset_name="$1"
-    
     load_config
-    
     if [ -z "${PIKO_PRESETS:-}" ]; then
         return
     fi
-    
     python3 - "$PIKO_PRESETS" "$preset_name" 2>/dev/null <<'PY'
-import json
-import sys
+import json, sys
 presets = json.loads(sys.argv[1])
 name = sys.argv[2]
 if name in presets:
@@ -32,25 +137,145 @@ PY
 
 list_presets() {
     load_config
-    
     if [ -z "${PIKO_PRESETS:-}" ]; then
         echo "No presets configured."
-        echo "Edit ~/.pikorc to add presets."
+        echo "Edit ~/.piko/config to add presets."
         return
     fi
-    
     python3 - "$PIKO_PRESETS" 2>/dev/null <<'PY' || true
-import json
-import sys
+import json, sys
 presets = json.loads(sys.argv[1])
-for name in presets:
-    domains = ", ".join(presets[name][:3])
-    if len(presets[name]) > 3:
-        domains += f" (+{len(presets[name])-3} more)"
-    print(f"  {name:15} - {domains}")
+for name in sorted(presets):
+    domains = presets[name]
+    print(f"  {name:15} {', '.join(domains[:3])}{'...' if len(domains) > 3 else ''}")
 PY
 }
 
-get_default_duration() {
-    echo "${PIKO_DEFAULT_DURATION:-60}"
+# --- Output helpers ---
+
+piko_info() {
+    echo "  $*"
+}
+
+piko_warn() {
+    echo "[piko] warning: $*" >&2
+}
+
+piko_error() {
+    echo "[piko] $*" >&2
+}
+
+# --- Formatting ---
+
+fmt_duration() {
+    local seconds=$1
+    if [ "$seconds" -le 0 ]; then
+        echo "0s"
+    elif [ "$seconds" -ge 3600 ]; then
+        local hours=$((seconds / 3600))
+        local mins=$(( (seconds % 3600) / 60 ))
+        if [ "$mins" -eq 0 ]; then
+            echo "${hours}h"
+        else
+            echo "${hours}h ${mins}m"
+        fi
+    elif [ "$seconds" -ge 60 ]; then
+        local mins=$(( (seconds + 30) / 60 ))
+        echo "${mins} minute$([ "$mins" -ne 1 ] && echo 's')"
+    else
+        echo "${seconds}s"
+    fi
+}
+
+fmt_time() {
+    local epoch=$1
+    date -d @"$epoch" "+%-I:%M %p" 2>/dev/null || echo "unknown"
+}
+
+# --- Dependency checking ---
+
+check_deps() {
+    local missing=()
+    command -v python3 >/dev/null 2>&1 || missing+=("python3")
+    command -v systemctl >/dev/null 2>&1 || missing+=("systemctl")
+    command -v chattr >/dev/null 2>&1 || missing+=("chattr (install e2fsprogs)")
+    if [ ${#missing[@]} -gt 0 ]; then
+        piko_error "missing required commands: ${missing[*]}"
+        echo ""
+        echo "Install them with:"
+        echo "  sudo apt install python3 e2fsprogs      # Debian/Ubuntu"
+        echo "  sudo dnf install python3 e2fsprogs       # Fedora"
+        echo "  sudo pacman -S python e2fsprogs coreutils  # Arch"
+        return 1
+    fi
+}
+
+# --- Browser process helpers ---
+
+browser_pids() {
+    local name
+    for name in "${PIKO_BROWSERS[@]}"; do
+        pgrep -x "$name" 2>/dev/null || true
+    done | sort -u
+}
+
+count_browser_pids() {
+    browser_pids | wc -l | tr -d ' '
+}
+
+browser_restart_required() {
+    [ -f "$PIKO_LAST_UNLOCK_FILE" ] || return 1
+
+    local last_unlock
+    last_unlock=$(cat "$PIKO_LAST_UNLOCK_FILE" 2>/dev/null) || return 1
+    [[ "$last_unlock" =~ ^[0-9]+$ ]] || return 1
+
+    local pid start start_epoch
+    while IFS= read -r pid; do
+        [ -z "$pid" ] && continue
+        start=$(ps -p "$pid" -o lstart= 2>/dev/null) || continue
+        start_epoch=$(date -d "$start" +%s 2>/dev/null) || continue
+        if [ "$start_epoch" -lt "$last_unlock" ]; then
+            return 0
+        fi
+    done < <(browser_pids)
+
+    return 1
+}
+
+firefox_policy_active() {
+    [ -f "$PIKO_FIREFOX_BACKUP_FILE" ] && return 0
+    [ -f "$PIKO_FIREFOX_CREATED_MARKER" ] && return 0
+    [ -f "$PIKO_FIREFOX_POLICY_FILE" ] || return 1
+    grep -q '"PikoManaged"[[:space:]]*:[[:space:]]*true' "$PIKO_FIREFOX_POLICY_FILE" 2>/dev/null
+}
+
+browser_policy_active() {
+    firefox_policy_active && return 0
+    [ -f "$PIKO_CHROME_POLICY_FILE" ] && return 0
+    [ -f "$PIKO_CHROMIUM_POLICY_FILE" ] && return 0
+    return 1
+}
+
+# --- Root helpers ---
+
+ensure_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        exec sudo "$0" "${PIKO_ORIGINAL_ARGS[@]}"
+    fi
+}
+
+# --- Session state ---
+
+is_active_session() {
+    if [ ! -f "$PIKO_UNLOCK_FILE" ]; then
+        return 1
+    fi
+    local unlock_at
+    unlock_at=$(cat "$PIKO_UNLOCK_FILE" 2>/dev/null) || return 1
+    # Validate it's a number
+    [[ "$unlock_at" =~ ^[0-9]+$ ]] || return 1
+    local now
+    now=$(date +%s)
+    [ "$unlock_at" -gt "$now" ] 2>/dev/null
 }

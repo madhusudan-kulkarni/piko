@@ -6,9 +6,29 @@ if [ "${1:-}" = "--reset-root-password" ]; then
     RESET_ROOT_PASSWORD=1
 fi
 
+check_deps() {
+    local missing=()
+    command -v python3 >/dev/null 2>&1 || missing+=("python3")
+    command -v systemctl >/dev/null 2>&1 || missing+=("systemctl")
+    command -v chattr >/dev/null 2>&1 || missing+=("chattr (install e2fsprogs)")
+    command -v readlink >/dev/null 2>&1 || missing+=("readlink (install coreutils)")
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "Missing required commands: ${missing[*]}"
+        echo ""
+        echo "Install them with:"
+        echo "  sudo apt install python3 e2fsprogs coreutils   # Debian/Ubuntu"
+        echo "  sudo dnf install python3 e2fsprogs coreutils   # Fedora"
+        echo "  sudo pacman -S python e2fsprogs coreutils        # Arch"
+        exit 1
+    fi
+}
+
 if [ "${EUID}" -ne 0 ]; then
     exec sudo "$0" "$@"
 fi
+
+check_deps
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CURRENT_USERNAME=${SUDO_USER:-}
@@ -19,69 +39,85 @@ if [ -z "${CURRENT_USERNAME}" ]; then
     exit 1
 fi
 
-install -m 755 "$SCRIPT_DIR/piko-block" /usr/local/bin/piko-block
-install -m 700 "$SCRIPT_DIR/piko-browser-cycle" /usr/local/bin/piko-browser-cycle
-install -m 700 "$SCRIPT_DIR/piko-browser-guard" /usr/local/bin/piko-browser-guard
-install -m 755 "$SCRIPT_DIR/piko-request-unlock" /usr/local/bin/piko-request-unlock
-install -m 755 "$SCRIPT_DIR/piko-unblock" /usr/local/bin/piko-unblock
-install -m 755 "$SCRIPT_DIR/piko-sync" /usr/local/bin/piko-sync
-install -m 755 "$SCRIPT_DIR/piko-status" /usr/local/bin/piko-status
-install -m 755 "$SCRIPT_DIR/piko-unlocked-now" /usr/local/bin/piko-unlocked-now
-install -m 700 "$SCRIPT_DIR/piko-watchdog" /usr/local/bin/piko-watchdog
-install -m 644 "$SCRIPT_DIR/piko-lib" /usr/local/bin/piko-lib
+CURRENT_HOME=$(getent passwd "$CURRENT_USERNAME" | cut -d: -f6)
+PIKO_HOME="${CURRENT_HOME}/.piko"
+PIKO_BIN_DIR="${PIKO_HOME}/bin"
+PIKO_STATE_DIR="${PIKO_HOME}/state"
+PIKO_COMPLETIONS_DIR="${PIKO_HOME}/completions"
 
-ln -sf /usr/local/bin/piko-request-unlock /usr/local/bin/piko-request-unblock
-mkdir -p /var/lib/piko
+echo "==> Installing Piko to ${PIKO_HOME}..."
 
-# Create user config file if it doesn't exist
-if [ ! -f "/home/${CURRENT_USERNAME}/.pikorc" ] && [ -f "$SCRIPT_DIR/piko.conf" ]; then
-    cp "$SCRIPT_DIR/piko.conf" "/home/${CURRENT_USERNAME}/.pikorc"
-    chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "/home/${CURRENT_USERNAME}/.pikorc"
-    echo "Config file created at ~/.pikorc"
+# Create directory structure
+mkdir -p "$PIKO_BIN_DIR"
+mkdir -p "$PIKO_STATE_DIR"
+mkdir -p "$PIKO_COMPLETIONS_DIR"
+
+# Install binaries
+install -m 755 "$SCRIPT_DIR/piko" "$PIKO_BIN_DIR/piko"
+install -m 644 "$SCRIPT_DIR/piko-lib" "$PIKO_BIN_DIR/piko-lib"
+install -m 700 "$SCRIPT_DIR/piko-browser-guard" "$PIKO_BIN_DIR/piko-browser-guard"
+install -m 700 "$SCRIPT_DIR/piko-browser-cycle" "$PIKO_BIN_DIR/piko-browser-cycle"
+install -m 700 "$SCRIPT_DIR/piko-watchdog" "$PIKO_BIN_DIR/piko-watchdog"
+
+# Set ownership to the real user
+chown -R "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "$PIKO_HOME"
+
+# Create symlink on PATH
+ln -sf "$PIKO_BIN_DIR/piko" /usr/local/bin/piko
+
+# Create config from template if it doesn't exist
+PIKO_CONFIG="${PIKO_HOME}/config"
+if [ ! -f "$PIKO_CONFIG" ] && [ -f "$SCRIPT_DIR/pikorc.template" ]; then
+    cp "$SCRIPT_DIR/pikorc.template" "$PIKO_CONFIG"
+    chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "$PIKO_CONFIG"
+    echo "Config created at ${PIKO_CONFIG}"
     echo "Edit it to customize default duration and add custom presets"
-else
-    # Check if existing config has uncommented presets
-    if [ -f "/home/${CURRENT_USERNAME}/.pikorc" ]; then
-        if ! grep -q '^[^#]*PIKO_PRESETS' "/home/${CURRENT_USERNAME}/.pikorc" 2>/dev/null; then
-            echo ""
-            echo "Note: Your ~/.pikorc may be outdated."
-            echo "Copy $SCRIPT_DIR/piko.conf to ~/.pikorc for latest presets."
-        fi
-    fi
 fi
 
-# Install shell completions
+# Write version and owner files
+echo "1.0.0" > "$PIKO_STATE_DIR/version"
+echo "$CURRENT_USERNAME" > "$PIKO_STATE_DIR/owner"
+chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "$PIKO_STATE_DIR/version" "$PIKO_STATE_DIR/owner"
+
+# Install completions
 if [ -d "$SCRIPT_DIR/completion" ]; then
     # Bash completion
     if [ -f "$SCRIPT_DIR/completion/piko-completion.bash" ]; then
+        cp "$SCRIPT_DIR/completion/piko-completion.bash" "$PIKO_COMPLETIONS_DIR/piko-completion.bash"
         mkdir -p /etc/bash_completion.d
         install -m 644 "$SCRIPT_DIR/completion/piko-completion.bash" /etc/bash_completion.d/piko
-        echo "Bash completion installed to /etc/bash_completion.d/piko"
-        echo "Source it with: source /etc/bash_completion.d/piko"
+        echo "Bash completion installed"
     fi
-    
+
     # Zsh completion
     if [ -f "$SCRIPT_DIR/completion/piko-completion.zsh" ]; then
-        mkdir -p "${HOME}/.zsh/completions"
-        cp "$SCRIPT_DIR/completion/piko-completion.zsh" "${HOME}/.zsh/completions/_piko"
-        echo "Zsh completion installed to ~/.zsh/completions/_piko"
-        echo "Add to your .zshrc: fpath=(~/.zsh/completions \$fpath)"
+        cp "$SCRIPT_DIR/completion/piko-completion.zsh" "$PIKO_COMPLETIONS_DIR/piko-completion.zsh"
+        mkdir -p "${CURRENT_HOME}/.zsh/completions"
+        cp "$SCRIPT_DIR/completion/piko-completion.zsh" "${CURRENT_HOME}/.zsh/completions/_piko"
+        chown -R "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "${CURRENT_HOME}/.zsh" 2>/dev/null || true
+        echo "Zsh completion installed"
     fi
 fi
 
-install -m 644 "$SCRIPT_DIR/piko-watchdog.service" /etc/systemd/system/piko-watchdog.service
+# Generate and install systemd units (substitute both PIKO_HOME and PIKO_USER)
+sed -e "s|__PIKO_HOME__|${PIKO_HOME}|g" \
+    -e "s|__PIKO_USER__|${CURRENT_USERNAME}|g" \
+    "$SCRIPT_DIR/piko-watchdog.service.in" > /etc/systemd/system/piko-watchdog.service
+
 install -m 644 "$SCRIPT_DIR/piko-watchdog.timer" /etc/systemd/system/piko-watchdog.timer
 
 systemctl daemon-reload
 systemctl enable --now piko-watchdog.timer
 
-SUDOERS_LINE="$CURRENT_USERNAME ALL=(ALL) ALL, !/usr/bin/chattr"
+# Set up sudoers — block chattr at all common paths
+SUDOERS_LINE="$CURRENT_USERNAME ALL=(ALL) ALL, !/usr/bin/chattr, !/sbin/chattr, !/usr/sbin/chattr"
 EDITOR='tee' visudo -f /etc/sudoers.d/piko >/dev/null <<EOF
 # Allow the current user full sudo EXCEPT chattr
 $SUDOERS_LINE
 EOF
 visudo -cf /etc/sudoers.d/piko >/dev/null
 
+# Root password
 echo ""
 ROOT_STATUS=$(passwd -S root 2>/dev/null | awk '{print $2}')
 if [ "$RESET_ROOT_PASSWORD" -eq 1 ] || [ "$ROOT_STATUS" != "P" ]; then
@@ -94,26 +130,26 @@ else
     echo "Use --reset-root-password to force a password reset."
 fi
 
+# Verification
 echo ""
 echo "Verification"
 echo "------------"
 systemctl is-active piko-watchdog.timer
-if sudo -l -U "$CURRENT_USERNAME" | grep -q "!/usr/bin/chattr"; then
+if sudo -l -U "$CURRENT_USERNAME" 2>/dev/null | grep -q "!/usr/bin/chattr"; then
     echo "chattr sudo policy: BLOCKED"
 else
     echo "chattr sudo policy: check sudoers manually"
 fi
-ls -la /usr/local/bin/piko-block /usr/local/bin/piko-browser-cycle /usr/local/bin/piko-browser-guard /usr/local/bin/piko-request-unlock /usr/local/bin/piko-unblock /usr/local/bin/piko-sync /usr/local/bin/piko-status /usr/local/bin/piko-unlocked-now /usr/local/bin/piko-watchdog /usr/local/bin/piko-lib
-ls -la /var/lib/piko/
+ls -la "$PIKO_BIN_DIR/"
+ls -la "$PIKO_STATE_DIR/"
+ls -la /usr/local/bin/piko
 
 echo ""
-echo "Piko setup complete."
+echo "Piko installed to ${PIKO_HOME}/"
 echo ""
-echo "  piko-block 90 instagram.com youtube.com   # block for 90 minutes"
-echo "  piko-status                            # check what's blocked"
-echo "  piko-sync                              # verify lock/unlock consistency"
-echo "  piko-unlocked-now                      # exit 0 only when fully unlocked"
-echo "  piko-request-unlock 30                 # request unlock after cooldown"
-echo "  piko-request-unblock 30                # alias of piko-request-unlock"
-echo "  su -                                    # switch to root"
-echo "  piko-unblock                           # emergency manual unblock"
+echo "  piko block 60 instagram.com youtube.com"
+echo "  piko block --preset social"
+echo "  piko status"
+echo "  piko check"
+echo "  piko unlock 30"
+echo "  piko --version"

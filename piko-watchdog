@@ -1,17 +1,21 @@
 #!/bin/bash
-HOSTS=/etc/hosts
-UNLOCK_FILE=/var/lib/piko/unlock_at
-REQUEST_FILE=/var/lib/piko/request_unlock_at
-DOMAINS_FILE=/var/lib/piko/domains
+set -e
 
-[ ! -f "$UNLOCK_FILE" ] && exit 0
+PIKO_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+PIKO_LIB_DIR="$(cd "$(dirname "$PIKO_SELF")" && pwd)"
+source "${PIKO_LIB_DIR}/piko-lib"
 
-UNLOCK_AT=$(cat "$UNLOCK_FILE")
+[ ! -f "$PIKO_UNLOCK_FILE" ] && exit 0
+
+UNLOCK_AT=$(cat "$PIKO_UNLOCK_FILE")
+# Validate unlock_at is numeric
+[[ "$UNLOCK_AT" =~ ^[0-9]+$ ]] || exit 0
+
 NOW=$(date +%s)
 
 REQUEST_AT=0
-if [ -f "$REQUEST_FILE" ]; then
-    REQUEST_AT=$(cat "$REQUEST_FILE")
+if [ -f "$PIKO_REQUEST_FILE" ]; then
+    REQUEST_AT=$(cat "$PIKO_REQUEST_FILE")
 fi
 
 SHOULD_UNLOCK=0
@@ -23,26 +27,28 @@ if [ "$REQUEST_AT" -gt 0 ] && [ "$NOW" -ge "$REQUEST_AT" ]; then
 fi
 
 if [ "$SHOULD_UNLOCK" -eq 1 ]; then
-    chattr -i "$HOSTS"
-    sed -i '/# piko:/d' "$HOSTS"
-    rm -f "$UNLOCK_FILE"
-    rm -f "$REQUEST_FILE"
-    rm -f "$DOMAINS_FILE"
-    /usr/local/bin/piko-browser-guard clear 2>/dev/null || true
-    /usr/local/bin/piko-browser-cycle unlock 2>/dev/null || true
+    chattr -i "$PIKO_HOSTS"
+    sed -i '/# piko:/d' "$PIKO_HOSTS"
+    rm -f "$PIKO_UNLOCK_FILE"
+    rm -f "$PIKO_REQUEST_FILE"
+    rm -f "$PIKO_DOMAINS_FILE"
+    "$PIKO_BIN_DIR/piko-browser-guard" clear || logger "Piko: browser guard clear failed"
+    "$PIKO_BIN_DIR/piko-browser-cycle" unlock || logger "Piko: browser cycle unlock failed"
     systemctl try-restart systemd-resolved 2>/dev/null || true
+    _piko_fix_permissions
     logger "Piko: session ended, hosts file unblocked"
 else
-    chattr -i "$HOSTS" 2>/dev/null || true
-    if [ -f "$DOMAINS_FILE" ]; then
+    chattr -i "$PIKO_HOSTS" 2>/dev/null || true
+    if [ -f "$PIKO_DOMAINS_FILE" ]; then
         while IFS= read -r domain; do
             [ -z "$domain" ] && continue
-            grep -q "# piko:${domain}:ipv4" "$HOSTS" || \
-                echo "127.0.0.1 $domain www.$domain # piko:${domain}:ipv4" >> "$HOSTS"
-            grep -q "# piko:${domain}:ipv6" "$HOSTS" || \
-                echo "::1 $domain www.$domain # piko:${domain}:ipv6" >> "$HOSTS"
-        done < "$DOMAINS_FILE"
+            grep -q "# piko:${domain}:ipv4" "$PIKO_HOSTS" || \
+                echo "127.0.0.1 $domain www.$domain # piko:${domain}:ipv4" >> "$PIKO_HOSTS"
+            grep -q "# piko:${domain}:ipv6" "$PIKO_HOSTS" || \
+                echo "::1 $domain www.$domain # piko:${domain}:ipv6" >> "$PIKO_HOSTS"
+        done < "$PIKO_DOMAINS_FILE"
     fi
-    /usr/local/bin/piko-browser-guard apply 2>/dev/null || true
-    chattr +i "$HOSTS"
+    "$PIKO_BIN_DIR/piko-browser-guard" apply || logger "Piko: browser guard apply failed"
+    chattr +i "$PIKO_HOSTS"
+    _piko_fix_permissions
 fi

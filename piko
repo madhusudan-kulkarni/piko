@@ -1,0 +1,644 @@
+#!/bin/bash
+set -eo pipefail
+
+# Resolve symlink so we find piko-lib correctly
+# (important when invoked via /usr/local/bin/piko symlink)
+PIKO_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+PIKO_LIB_DIR="$(cd "$(dirname "$PIKO_SELF")" && pwd)"
+source "${PIKO_LIB_DIR}/piko-lib"
+
+PIKO_ORIGINAL_ARGS=("$@")
+
+# ============================================================
+# Command: help
+# ============================================================
+
+cmd_help() {
+    cat <<'EOF'
+Usage: piko <command> [options]
+
+Block websites for focused work sessions.
+
+Commands:
+  block <minutes> [domains...]  Start a blocking session
+  status                        Show current block status
+  unlock [minutes]              Request early unlock after cooldown
+  check                         Verify block consistency
+  uninstall                     Remove Piko from your system
+
+Options:
+  --version                     Show version
+  -h, --help                    Show this help
+
+Run 'piko <command> --help' for details on a command.
+
+Examples:
+  piko block 60 instagram.com youtube.com
+  piko block --preset social 90
+  piko status
+  piko unlock 30
+  piko check
+EOF
+}
+
+# ============================================================
+# Command: block
+# ============================================================
+
+cmd_block() {
+    local PRESETS=()
+    local DOMAINS=()
+    local MINUTES=""
+    local FORCE=0
+
+    # Scan for early-exit flags first (no root needed)
+    for arg in "$@"; do
+        case "$arg" in
+            -l|--list)
+                list_presets
+                exit 0
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: piko block <minutes> [options] [domains...]
+
+Start a blocking session.
+
+Arguments:
+  minutes              Duration in minutes (default: 60, or PIKO_DEFAULT_DURATION)
+  domains              Websites to block (e.g. instagram.com)
+
+Options:
+  -p, --preset NAME    Add preset blocklist (can be repeated)
+  --list               List available presets
+  --force              Replace existing session instead of erroring
+  -h, --help           Show this help
+
+Examples:
+  piko block 60 instagram.com youtube.com
+  piko block --preset social 90
+  piko block -p social -p news 30
+  piko block --list
+EOF
+                exit 0
+                ;;
+        esac
+    done
+
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -p|--preset)
+                if [ -z "${2:-}" ] || [[ "${2:-}" = -* ]]; then
+                    piko_error "--preset requires a name"
+                    echo ""
+                    echo "  piko block --list       # see available presets"
+                    echo "  piko block 60 --preset social"
+                    exit 1
+                fi
+                PRESETS+=("$2")
+                shift 2
+                ;;
+            --force)
+                FORCE=1
+                shift
+                ;;
+            *)
+                if [ -z "$MINUTES" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                    MINUTES="$1"
+                else
+                    DOMAINS+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Default duration
+    if [ -z "$MINUTES" ]; then
+        load_config
+        MINUTES=$(get_default_duration)
+    fi
+
+    # Validate duration
+    if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -le 0 ]; then
+        piko_error "duration must be a positive number (got: ${MINUTES:-empty})"
+        echo ""
+        echo "  piko block 60 instagram.com"
+        echo "  piko block --preset social"
+        exit 1
+    fi
+
+    # Resolve presets
+    for preset in "${PRESETS[@]}"; do
+        local domains_str
+        domains_str=$(get_preset_domains "$preset")
+        if [ -z "$domains_str" ]; then
+            piko_error "unknown preset '$preset'"
+            echo ""
+            echo "  piko block --list    # see available presets"
+            exit 1
+        fi
+        IFS=',' read -ra ADDR <<< "$domains_str"
+        for d in "${ADDR[@]}"; do
+            d=$(echo "$d" | xargs)
+            [ -n "$d" ] && DOMAINS+=("$d")
+        done
+    done
+
+    # Check for active session
+    if is_active_session && [ "$FORCE" -eq 0 ]; then
+        local unlock_at remaining
+        unlock_at=$(cat "$PIKO_UNLOCK_FILE")
+        remaining=$(( unlock_at - $(date +%s) ))
+        piko_error "already in an active block session ($(fmt_duration "$remaining") remaining)"
+        echo ""
+        echo "  piko status           # see current session details"
+        echo "  piko unlock 30        # request early unlock (30 min cooldown)"
+        echo "  piko block --force .. # replace current session"
+        exit 1
+    fi
+
+    # If forcing, merge existing domains
+    if [ "$FORCE" -eq 1 ] && [ -f "$PIKO_DOMAINS_FILE" ]; then
+        while IFS= read -r d; do
+            [ -z "$d" ] && continue
+            DOMAINS+=("$d")
+        done < "$PIKO_DOMAINS_FILE"
+    fi
+
+    # Validate we have domains
+    if [ ${#DOMAINS[@]} -eq 0 ]; then
+        piko_error "no sites specified"
+        echo ""
+        echo "  piko block 60 instagram.com youtube.com"
+        echo "  piko block --preset social"
+        echo "  piko block --list       # see all presets"
+        exit 1
+    fi
+
+    # Need root from here
+    check_deps || exit 1
+    ensure_root
+
+    mkdir -p "$PIKO_STATE_DIR"
+
+    # Unlock hosts file for editing
+    chattr -i "$PIKO_HOSTS" 2>/dev/null || true
+
+    # Clear and rewrite domains file
+    : > "$PIKO_DOMAINS_FILE"
+    for domain in "${DOMAINS[@]}"; do
+        # Normalize
+        domain=${domain,,}
+        domain=${domain#http://}
+        domain=${domain#https://}
+        domain=${domain%%/*}
+        domain=${domain#www.}
+        [ -z "$domain" ] && continue
+
+        # Deduplicate
+        if ! grep -qx "$domain" "$PIKO_DOMAINS_FILE" 2>/dev/null; then
+            printf '%s\n' "$domain" >> "$PIKO_DOMAINS_FILE"
+        fi
+
+        # Add hosts entries
+        grep -q "# piko:${domain}:ipv4" "$PIKO_HOSTS" 2>/dev/null || \
+            echo "127.0.0.1 $domain www.$domain # piko:${domain}:ipv4" >> "$PIKO_HOSTS"
+        grep -q "# piko:${domain}:ipv6" "$PIKO_HOSTS" 2>/dev/null || \
+            echo "::1 $domain www.$domain # piko:${domain}:ipv6" >> "$PIKO_HOSTS"
+    done
+
+    # Set unlock timer
+    date -d "+${MINUTES} minutes" +%s > "$PIKO_UNLOCK_FILE"
+
+    # Write owner file for permission fixups when running via systemd
+    _piko_real_user > "$PIKO_OWNER_FILE"
+
+    # Lock hosts file
+    chattr +i "$PIKO_HOSTS"
+
+    # Clear any pending unlock request (new session supersedes it)
+    rm -f "$PIKO_REQUEST_FILE"
+
+    # Apply browser blocking
+    if ! "$PIKO_BIN_DIR/piko-browser-guard" apply 2>&1; then
+        piko_warn "browser policy failed to apply — sites may still be accessible in browsers until restart"
+    fi
+    if ! "$PIKO_BIN_DIR/piko-browser-cycle" lock 2>&1; then
+        piko_warn "could not restart browsers — please restart them manually for full blocking"
+    fi
+
+    # Restart DNS resolver
+    systemctl try-restart systemd-resolved 2>/dev/null || true
+
+    # Fix file ownership so piko status (no sudo) can read them
+    _piko_fix_permissions
+
+    # Print success
+    local unlock_at remaining_human domain_count
+    unlock_at=$(cat "$PIKO_UNLOCK_FILE")
+    remaining_human=$(fmt_time "$unlock_at")
+    domain_count=$(wc -l < "$PIKO_DOMAINS_FILE" | tr -d ' ')
+
+    echo "Blocked ${domain_count} site$([ "$domain_count" -ne 1 ] && echo 's') for ${MINUTES} minute$([ "$MINUTES" -ne 1 ] && echo 's') (unlocks at ${remaining_human})"
+    echo ""
+    echo "  $(sed ':a;N;$!ba;s/\n/, /g' "$PIKO_DOMAINS_FILE")"
+    echo ""
+    echo "Your browsers were restarted to apply blocking."
+}
+
+# ============================================================
+# Command: status
+# ============================================================
+
+cmd_status() {
+    local quiet=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -q|--quiet) quiet=1; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: piko status [options]
+
+Show current blocking status.
+
+Options:
+  -q, --quiet    Exit code only: 0=unblocked, 1=blocked, 2=hosts stale, 3=policies stale, 4=browser restart needed
+  -h, --help     Show this help
+
+Examples:
+  piko status           # show current status
+  piko status --quiet   # exit code only (for scripts)
+EOF
+                exit 0
+                ;;
+            *) shift ;;
+        esac
+    done
+
+    # Quiet mode: exit codes only
+    if [ "$quiet" -eq 1 ]; then
+        if is_active_session; then
+            exit 1
+        fi
+
+        if grep -q '# piko:' "$PIKO_HOSTS" 2>/dev/null; then
+            exit 2
+        fi
+
+        if browser_policy_active; then
+            exit 3
+        fi
+
+        if browser_restart_required; then
+            exit 4
+        fi
+
+        exit 0
+    fi
+
+    # Verbose mode
+    if ! is_active_session; then
+        echo "No active block session."
+        echo ""
+        echo "Start one:"
+        echo "  piko block 60 instagram.com youtube.com"
+        echo "  piko block --preset social"
+        exit 0
+    fi
+
+    local unlock_at now remaining
+    unlock_at=$(cat "$PIKO_UNLOCK_FILE" 2>/dev/null)
+    now=$(date +%s)
+    remaining=$(( unlock_at - now ))
+
+    if [ "$remaining" -le 0 ]; then
+        echo "Block session expired (watchdog will clean up within 60 seconds)."
+    else
+        echo "Blocked for $(fmt_duration "$remaining") more (unlocks at $(fmt_time "$unlock_at"))"
+    fi
+
+    echo ""
+
+    # Show domains
+    if [ -f "$PIKO_DOMAINS_FILE" ]; then
+        echo "Blocked sites: $(sed ':a;N;$!ba;s/\n/, /g' "$PIKO_DOMAINS_FILE")"
+    fi
+
+    # Browser blocking status
+    if browser_policy_active; then
+        echo "Browser blocking: active"
+    else
+        echo "Browser blocking: not active"
+    fi
+
+    # Coerced unlock status
+    if [ -f "$PIKO_REQUEST_FILE" ]; then
+        local request_at request_remaining
+        request_at=$(cat "$PIKO_REQUEST_FILE")
+        request_remaining=$(( request_at - now ))
+        if [ "$request_remaining" -le 0 ]; then
+            echo "Early unlock: due now (watchdog processing within 60s)"
+        else
+            echo "Early unlock: $(fmt_duration "$request_remaining") of cooldown remaining"
+        fi
+    fi
+}
+
+# ============================================================
+# Command: unlock
+# ============================================================
+
+cmd_unlock() {
+    local minutes=""
+    local now_mode=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --now) now_mode=1; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: piko unlock [minutes] [--now]
+
+Request early unlock after a cooldown period.
+The cooldown cannot be cancelled or shortened once requested.
+
+Arguments:
+  minutes       Cooldown delay in minutes (default: 30)
+
+Options:
+  --now         Emergency immediate unblock (requires sudo)
+  -h, --help    Show this help
+
+Examples:
+  piko unlock 30       # request unlock after 30-minute cooldown
+  piko unlock          # use default 30-minute cooldown
+  piko unlock --now    # emergency unblock (requires root password)
+EOF
+                exit 0
+                ;;
+            *)
+                if [ -z "$minutes" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                    minutes="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ "$now_mode" -eq 1 ]; then
+        cmd_unlock_now
+        return
+    fi
+
+    # Coerced unlock with cooldown
+    [ -z "$minutes" ] && minutes=30
+
+    if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -le 0 ]; then
+        piko_error "cooldown must be a positive number of minutes"
+        echo ""
+        echo "  piko unlock 30      # 30 minute cooldown"
+        exit 1
+    fi
+
+    if ! is_active_session; then
+        echo "No active block session."
+        echo ""
+        echo "Start one: piko block 60 instagram.com"
+        exit 0
+    fi
+
+    ensure_root
+
+    local now request_at
+    now=$(date +%s)
+    request_at=$(( now + minutes * 60 ))
+
+    if [ -f "$PIKO_REQUEST_FILE" ]; then
+        local existing
+        existing=$(cat "$PIKO_REQUEST_FILE")
+        if [ "$request_at" -lt "$existing" ]; then
+            piko_error "an earlier unlock is already requested (at $(fmt_time "$existing"))"
+            echo "You cannot shorten an existing cooldown."
+            exit 1
+        fi
+    fi
+
+    mkdir -p "$PIKO_STATE_DIR"
+    printf '%s\n' "$request_at" > "$PIKO_REQUEST_FILE"
+    systemctl start piko-watchdog.service 2>/dev/null || true
+
+    # Fix permissions
+    _piko_fix_permissions
+
+    echo "Early unlock requested with a ${minutes}-minute cooldown."
+    echo "You cannot cancel this. Unlocks at $(fmt_time "$request_at") (may take up to 60 seconds after cooldown)."
+}
+
+cmd_unlock_now() {
+    ensure_root
+
+    if [ ! -f "$PIKO_UNLOCK_FILE" ]; then
+        echo "No active block session to remove."
+        exit 0
+    fi
+
+    echo "This will remove all blocks immediately, skipping the cooldown."
+    echo "This defeats the purpose of Piko."
+    echo ""
+    read -r -p "Type 'yes' to confirm: " confirm
+    [ "$confirm" != "yes" ] && echo "Aborted." && exit 1
+
+    chattr -i "$PIKO_HOSTS" 2>/dev/null || true
+    sed -i '/# piko:/d' "$PIKO_HOSTS"
+    rm -f "$PIKO_UNLOCK_FILE"
+    rm -f "$PIKO_REQUEST_FILE"
+    rm -f "$PIKO_DOMAINS_FILE"
+
+    if ! "$PIKO_BIN_DIR/piko-browser-guard" clear 2>&1; then
+        piko_warn "could not clear browser policies — try restarting your browser"
+    fi
+    if ! "$PIKO_BIN_DIR/piko-browser-cycle" unlock 2>&1; then
+        piko_warn "could not restart browsers — try restarting them manually"
+    fi
+
+    systemctl try-restart systemd-resolved 2>/dev/null || true
+    echo "All blocks removed."
+}
+
+# ============================================================
+# Command: check
+# ============================================================
+
+cmd_check() {
+    [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && {
+        cat <<'EOF'
+Usage: piko check
+
+Verify that your blocking session is consistent.
+Checks that hosts file, browser policies, and session state all agree.
+
+Exit codes:
+  0   Everything is consistent
+  1   Drift detected (active session but enforcement missing)
+  2   Stale artifacts (no session but blocking remnants)
+  3   Browser restart required after unlock
+
+Examples:
+  piko check
+EOF
+        exit 0
+    }
+
+    local active_session=0
+    if is_active_session; then
+        active_session=1
+    fi
+
+    local hosts_count
+    hosts_count=$(grep -c '# piko:' "$PIKO_HOSTS" 2>/dev/null || true)
+    hosts_count=${hosts_count:-0}
+
+    local policy_present=0
+    browser_policy_active && policy_present=1
+
+    local request_pending=0
+    [ -f "$PIKO_REQUEST_FILE" ] && request_pending=1
+
+    local browser_count
+    browser_count=$(count_browser_pids)
+
+    if [ "$active_session" -eq 1 ]; then
+        local unlock_at remaining
+        unlock_at=$(cat "$PIKO_UNLOCK_FILE" 2>/dev/null)
+        remaining=$(( unlock_at - $(date +%s) ))
+        if [ "$remaining" -le 0 ]; then
+            echo "Block session: expired (watchdog cleaning up)"
+        else
+            echo "Block session: active ($(fmt_duration "$remaining") remaining)"
+        fi
+    else
+        echo "Block session: none"
+    fi
+
+    echo "Hosts blocking: $([ "$hosts_count" -gt 0 ] && echo "active ($hosts_count entries)" || echo "not active")"
+    echo "Browser blocking: $([ "$policy_present" -eq 1 ] && echo "active" || echo "not active")"
+    echo "Early unlock: $([ "$request_pending" -eq 1 ] && echo "requested" || echo "not requested")"
+    echo "Browser processes: $browser_count"
+
+    # Drift: active session but no enforcement
+    if [ "$active_session" -eq 1 ] && { [ "$hosts_count" -eq 0 ] || [ "$policy_present" -eq 0 ]; }; then
+        echo ""
+        piko_error "your block session is active but blocking is not fully enforced"
+        echo ""
+        echo "Try: piko block --force (re-apply blocks)"
+        echo "     piko check     (verify again after)"
+        exit 1
+    fi
+
+    # Stale: no session but artifacts remain
+    if [ "$active_session" -eq 0 ] && { [ "$hosts_count" -gt 0 ] || [ "$policy_present" -eq 1 ]; }; then
+        echo ""
+        piko_error "stale blocking found (no active session but blocking remnants)"
+        echo ""
+        echo "Fix: piko unlock --now"
+        exit 2
+    fi
+
+    # Browser restart needed after unlock
+    if [ "$active_session" -eq 0 ] && browser_restart_required; then
+        echo ""
+        piko_error "unlocked but browser restart required for blocking to clear"
+        echo ""
+        echo "Fix: restart your browsers"
+        exit 3
+    fi
+
+    echo ""
+    echo "Everything looks consistent."
+}
+
+# ============================================================
+# Command: uninstall
+# ============================================================
+
+cmd_uninstall() {
+    [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && {
+        cat <<'EOF'
+Usage: piko uninstall
+
+Remove Piko and all block sessions from your system.
+Removes ~/.piko/, system units, browser policies, and sudoers rules.
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  piko uninstall
+EOF
+        exit 0
+    }
+
+    ensure_root
+
+    echo "This will remove Piko and all block sessions from your system."
+    echo ""
+    read -r -p "Are you sure? Type 'yes' to confirm: " confirm
+    [ "$confirm" != "yes" ] && echo "Aborted." && exit 0
+
+    # Remove any active blocks and browser policies
+    chattr -i "$PIKO_HOSTS" 2>/dev/null || true
+    sed -i '/# piko:/d' "$PIKO_HOSTS"
+    "$PIKO_BIN_DIR/piko-browser-guard" clear 2>/dev/null || true
+
+    # Stop and remove systemd units (stop service too, not just timer)
+    echo "Stopping watchdog..."
+    systemctl stop piko-watchdog.service 2>/dev/null || true
+    systemctl disable --now piko-watchdog.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/piko-watchdog.timer
+    rm -f /etc/systemd/system/piko-watchdog.service
+    systemctl daemon-reload
+
+    # Remove symlink
+    rm -f /usr/local/bin/piko
+
+    # Remove the self-contained directory
+    echo "Removing piko..."
+    rm -rf "$PIKO_HOME"
+
+    # Remove sudoers
+    rm -f /etc/sudoers.d/piko
+
+    # Remove shell completions
+    rm -f /etc/bash_completion.d/piko
+    local piko_real_home
+    piko_real_home=$(_piko_real_home)
+    rm -f "${piko_real_home}/.zsh/completions/_piko" 2>/dev/null || true
+
+    echo ""
+    echo "Piko uninstalled."
+}
+
+# ============================================================
+# Main dispatch
+# ============================================================
+
+if [ "${1:-}" = "--version" ]; then
+    echo "piko ${PIKO_VERSION}"
+    exit 0
+fi
+
+COMMAND="${1:-help}"
+shift || true
+
+case "$COMMAND" in
+    block)      cmd_block "$@" ;;
+    status)     cmd_status "$@" ;;
+    unlock)     cmd_unlock "$@" ;;
+    check)      cmd_check "$@" ;;
+    uninstall)  cmd_uninstall "$@" ;;
+    help|-h|--help|"") cmd_help; exit 0 ;;
+    *) piko_error "unknown command '$COMMAND'"; echo ""; cmd_help >&2; exit 1 ;;
+esac

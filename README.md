@@ -1,60 +1,148 @@
 # Piko
 
-Piko is a Linux website blocker for focused work sessions.
+A high-friction Linux website blocker for focused work sessions.
 
-It blocks sites using:
-- `/etc/hosts` rules
-- Firefox/Chrome managed policies
-- a systemd watchdog timer
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This is a high-friction tool - sessions cannot be undone until the timer expires.
+**High-friction means no shortcuts.** Once a session starts, it cannot be undone until the timer expires — the block is enforced by the OS, not your willpower.
 
 ## Install
 
 ```bash
-cd ~/Projects/piko
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/madhusudan-kulkarni/piko/main/setup.sh | bash
 ```
+
+Or clone and install manually:
+
+```bash
+git clone https://github.com/madhusudan-kulkarni/piko.git ~/.piko
+cd ~/.piko
+bash ./install.sh
+```
+
+Everything installs to `~/.piko/` — binaries, config, and state. A single symlink at `/usr/local/bin/piko` puts it on your PATH.
 
 During installation, you will be prompted to set a root password. This is required for the emergency unblock feature. Choose a long, memorable passphrase.
 
-> **Note:** Without the root password, blocks cannot be manually removed until the timer expires - this is intentional for focus.
+> **Note:** Without the root password, blocks cannot be manually removed until the timer expires — this is intentional for focus.
+
+### Prerequisites
+
+- Linux with **systemd**
+- `sudo` access
+- `bash` and `python3`
+- Firefox and/or Chrome/Chromium (for browser-level policy blocking)
+
+### Uninstall
+
+```bash
+piko uninstall
+# or
+make uninstall
+```
+
+Removes `~/.piko/`, the symlink, systemd units, and sudoers rules. Clean.
+
+## How it works
+
+Piko enforces blocks through three simultaneous layers:
+
+1. **`/etc/hosts`** — Blocked domains are redirected to `127.0.0.1`. The hosts file is locked with `chattr +i` (immutable), preventing edits even with `sudo`.
+2. **Browser policies** — Firefox and Chrome/Chromium managed policies are deployed to block domains at the browser level. This catches attempts to bypass `/etc/hosts` (e.g., using a different DNS resolver).
+3. **Watchdog timer** — A systemd timer (`piko-watchdog.timer`) runs every 60 seconds, checking whether the session has expired. When time is up, it automatically removes all blocks by reversing the three layers above. The watchdog also cycles browser processes on lock/unlock so policy changes take effect immediately.
+
+The complete flow of a session:
+
+```
+piko block 60 twitter.com
+  → writes domains to ~/.piko/state/domains
+  → locks /etc/hosts with chattr +i
+  → deploys browser block policies
+  → kills running browsers (policy changes apply on restart)
+  → sets unlock timestamp
+
+[every 60s] watchdog checks timestamp
+  → if expired: clears blocks, removes policies, restarts browsers
+
+piko unlock 30 (optional)
+  → sets a cooldown timestamp
+  → watchdog clears blocks once cooldown + original timer expires
+```
 
 ## Quick Start
 
 ```bash
 # Block sites for 60 minutes
-piko-block 60 instagram.com youtube.com
+piko block 60 instagram.com youtube.com
 
-# Or use presets
-piko-block --preset social
-piko-block -p social -p news 90
+# Use presets
+piko block --preset social 90
+piko block -p social -p news 30
+
+# List available presets
+piko block --list
+
+# Check if blocked
+piko status
+
+# Verify consistency
+piko check
+
+# Request early unlock (30-minute cooldown, cannot be cancelled)
+piko unlock 30
 ```
+
+Omitting a duration uses the default configured in `~/.piko/config` (default: 60 minutes).
 
 ## Commands
 
-```bash
-piko-block <minutes> [domains...]     # Block websites
-  -p, --preset NAME                   # Use preset blocklist
-  -l, --list                          # List available presets
-  
-piko-status                           # Show current status
-piko-sync                            # Verify lock/unlock consistency
-piko-unlocked-now                    # Check if fully unlocked
-piko-request-unlock [minutes]        # Request early unlock with cooldown
-piko-request-unblock [minutes]       # Alias for piko-request-unlock
-piko-unblock                         # Emergency manual unblock (requires sudo)
 ```
+piko block <minutes> [domains...]   Start a blocking session
+  -p, --preset NAME                 Add preset blocklist (repeatable)
+  --list                            List available presets
+  --force                           Replace existing session
+
+piko status                         Show current block status
+  -q, --quiet                       Exit code only (0=unblocked, 1=blocked)
+
+piko unlock [minutes]               Request early unlock (coerced cooldown)
+  --now                             Emergency immediate unblock (root password)
+
+piko check                          Verify block consistency
+piko uninstall                      Remove Piko from your system
+piko help                           Show help
+piko --version                      Show version
+```
+
+### Coerced unlock
+
+If you absolutely need to end a session early, use `piko unlock`:
+
+```bash
+piko unlock 30
+```
+
+This queues an early unlock after a 30-minute cooldown. Once requested, the cooldown **cannot be cancelled or shortened** — you are committed to waiting. After the cooldown expires, the watchdog clears the blocks automatically (within 60 seconds).
+
+Use coerced unlock sparingly. The point of Piko is the friction.
+
+### Emergency unblock
+
+```bash
+piko unlock --now
+```
+
+This requires the root password set during installation. When invoked, it removes all blocks immediately — no cooldown, no waiting. Use only for legitimate technical issues.
 
 ## Configuration
 
-All settings are in `~/.pikorc` (created during install).
+All settings are in `~/.piko/config` (created during installation). Edit it to customize defaults:
 
 ```bash
 # Default duration in minutes
 PIKO_DEFAULT_DURATION=60
 
-# Presets (JSON format)
+# User-defined presets (JSON)
 PIKO_PRESETS='{
   "social": ["instagram.com", "twitter.com", "facebook.com", "tiktok.com", "reddit.com", "linkedin.com"],
   "news": ["cnn.com", "bbc.com", "news.ycombinator.com", "nytimes.com", "theguardian.com"],
@@ -62,11 +150,6 @@ PIKO_PRESETS='{
   "shopping": ["amazon.com", "ebay.com", "etsy.com"],
   "work": ["reddit.com", "twitter.com", "news.ycombinator.com"]
 }'
-```
-
-View available presets:
-```bash
-piko-block --list
 ```
 
 ### Presets
@@ -79,40 +162,27 @@ piko-block --list
 | shopping | amazon.com, ebay.com, etsy.com |
 | work | reddit.com, twitter.com, news.ycombinator.com |
 
-## Configuration
+## Troubleshooting
 
-A config file is created at `~/.pikorc` during installation. Edit it to customize defaults:
+### Blocks aren't working
 
-```bash
-# Default duration in minutes
-PIKO_DEFAULT_DURATION=60
+Browser policy changes take effect on browser restart. Piko kills running browsers when locking/unlocking, so any newly opened browser should pick up the policies. If a browser was left running (e.g., started after the lock), restart it manually.
 
-# User-defined presets (JSON)
-PIKO_PRESETS='{"custom": ["example.com", "test.com"]}'
-```
+### Other browsers (Brave, Vivaldi, etc.)
 
-## Help
+Only Firefox and Chrome/Chromium are currently supported for policy-based blocking. `/etc/hosts` blocking still works regardless of browser — run `piko check` to verify it is active.
 
-All commands support `-h` or `--help`:
+### Timer expired but blocks remain
 
-```bash
-piko-block --help
-piko-status --help
-```
+The watchdog runs every 60 seconds. Wait up to a minute, then check `piko status`. If blocks persist, run `piko unlock --now` to remove them, or reboot.
 
-## Shell Completion
+### Cannot edit `/etc/hosts` manually
 
-Bash and Zsh completion are installed automatically.
+This is expected during an active session — Piko locks the file with `chattr +i`. The `sudoers.d/piko` rule also blocks `chattr` to prevent bypass. Use `piko unlock --now` to remove blocks cleanly.
 
-For manual sourcing:
-- Bash: `source /etc/bash_completion.d/piko`
-- Zsh: Add `fpath=(~/.zsh/completions $fpath)` to .zshrc
+### piko check shows drift
 
-## Emergency Unblock
-
-```bash
-sudo piko-unblock
-```
+If `piko check` reports that your block session is active but blocking is not enforced, something went wrong. Try `piko block --force` to re-apply blocks, then `piko check` again.
 
 ## Verify
 
@@ -122,21 +192,36 @@ make verify
 
 If Piko is uninstalled, `make verify` will fail with `piko-watchdog.timer is not active` (expected).
 
-## Uninstall
+## Files
 
-```bash
-sudo ./uninstall.sh
+Everything lives in `~/.piko/`:
+
+```
+~/.piko/
+├── bin/                    # piko, piko-lib, piko-browser-guard, piko-browser-cycle, piko-watchdog
+├── state/                  # Runtime state (domains, unlock timers, version)
+├── completions/            # Shell completions (bash, zsh)
+└── config                  # User configuration (presets, defaults)
 ```
 
-## Files Installed
+System paths (required for functionality):
 
-- Binaries: `/usr/local/bin/piko-*`
-- Units: `/etc/systemd/system/piko-watchdog.service`, `/etc/systemd/system/piko-watchdog.timer`
-- State: `/var/lib/piko`
-- Sudo rule: `/etc/sudoers.d/piko`
+| Path | Purpose |
+|------|---------|
+| `/usr/local/bin/piko` | Symlink to `~/.piko/bin/piko` (on PATH) |
+| `/etc/systemd/system/piko-watchdog.service` | Watchdog service unit |
+| `/etc/systemd/system/piko-watchdog.timer` | Watchdog timer (60s interval) |
+| `/etc/sudoers.d/piko` | Sudo rule (blocks `chattr` for the user) |
+| `/etc/hosts` | Modified during sessions (locked with `chattr +i`) |
+| `/etc/firefox/policies/`, `/etc/opt/chrome/`, `/etc/chromium/` | Browser policy files |
 
 ## Limitations
 
 - Piko is high-friction, not mathematically unbypassable.
 - If a user keeps broad `sudo`/root powers, bypass is always possible.
-- Browser policy changes are most reliable when browsers are restarted; Piko also cycles browser processes on lock/unlock.
+- Only Firefox and Chrome/Chromium receive browser policy blocks. Other browsers rely solely on `/etc/hosts`.
+- Browser policy changes are most reliable when browsers are restarted; Piko cycles browser processes on lock/unlock for this reason.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

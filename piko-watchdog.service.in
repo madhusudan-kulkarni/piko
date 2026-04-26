@@ -1,0 +1,9 @@
+[Unit]
+Description=Piko Hosts Watchdog
+
+[Service]
+Type=oneshot
+Environment=PIKO_HOME=__PIKO_HOME__
+Environment=PIKO_USER=__PIKO_USER__
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=__PIKO_HOME__/bin/piko-watchdog
