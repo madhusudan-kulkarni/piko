@@ -77,7 +77,7 @@ if [ ! -f "$PIKO_CONFIG" ] && [ -f "$SCRIPT_DIR/pikorc.template" ]; then
 fi
 
 # Write version and owner files
-echo "1.2.0" > "$PIKO_STATE_DIR/version"
+echo "2026.04.27" > "$PIKO_STATE_DIR/version"
 echo "$CURRENT_USERNAME" > "$PIKO_STATE_DIR/owner"
 chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "$PIKO_STATE_DIR/version" "$PIKO_STATE_DIR/owner"
 
