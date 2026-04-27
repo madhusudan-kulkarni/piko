@@ -32,7 +32,7 @@ PIKO_HOME="$(_piko_resolve_home)"
 PIKO_BIN_DIR="$PIKO_HOME/bin"
 PIKO_STATE_DIR="$PIKO_HOME/state"
 PIKO_COMPLETIONS_DIR="$PIKO_HOME/completions"
-PIKO_HOSTS="/etc/hosts"
+PIKO_HOSTS="${PIKO_HOSTS:-/etc/hosts}"
 
 PIKO_UNLOCK_FILE="$PIKO_STATE_DIR/unlock_at"
 PIKO_REQUEST_FILE="$PIKO_STATE_DIR/request_unlock_at"

@@ -118,7 +118,7 @@ EOF
                 shift
                 ;;
             *)
-                if [ -z "$MINUTES" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                if [ -z "$MINUTES" ] && [[ "$1" =~ ^-?[0-9]+$ ]]; then
                     MINUTES="$1"
                 else
                     DOMAINS+=("$1")
