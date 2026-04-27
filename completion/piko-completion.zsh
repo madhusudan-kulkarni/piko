@@ -4,9 +4,11 @@ _piko() {
     local -a commands
     commands=(
         'block:Start a blocking session'
+        'extend:Extend the current session'
         'status:Show current block status'
         'unlock:Request early unlock'
         'check:Verify block consistency'
+        'history:Show past sessions'
         'uninstall:Remove Piko from your system'
         'help:Show help'
     )
@@ -27,6 +29,13 @@ _piko() {
                         '--preset[Preset blocklist]:preset:_piko_presets' \
                         '--list[List available presets]' \
                         '--force[Replace existing session]' \
+                        '--dry-run[Show what would be blocked]' \
+                        '-h[Show help]' \
+                        '--help[Show help]' \
+                        ':minutes:'
+                    ;;
+                extend)
+                    _arguments \
                         '-h[Show help]' \
                         '--help[Show help]' \
                         ':minutes:'
@@ -42,6 +51,13 @@ _piko() {
                     _arguments \
                         '-q[Exit 0 only if unlocked]' \
                         '--quiet[Exit 0 only if unlocked]' \
+                        '-h[Show help]' \
+                        '--help[Show help]'
+                    ;;
+                history)
+                    _arguments \
+                        '-n[Show last N entries]:count:' \
+                        '--week[Show weekly summary]' \
                         '-h[Show help]' \
                         '--help[Show help]'
                     ;;

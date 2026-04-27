@@ -14,30 +14,38 @@ PIKO_ORIGINAL_ARGS=("$@")
 # ============================================================
 
 cmd_help() {
-    cat <<'EOF'
-Usage: piko <command> [options]
+    echo ""
+    echo "${_C_BOLD}  piko${_C_RESET} ${_C_DIM}— high-friction website blocker${_C_RESET}"
+    echo ""
+    cat <<EOF
+${_C_BOLD}Usage:${_C_RESET} piko <command> [options]
 
-Block websites for focused work sessions.
+${_C_BOLD}Commands:${_C_RESET}
+  ${_C_GREEN}block${_C_RESET} <minutes> [domains...]  Start a blocking session
+  ${_C_GREEN}extend${_C_RESET} <minutes>             Extend the current session
+  ${_C_GREEN}schedule${_C_RESET}                       Manage automated blocking schedules
+  ${_C_GREEN}status${_C_RESET}                        Show current block status
+  ${_C_GREEN}stats${_C_RESET}                         Show beautiful focus statistics
+  ${_C_GREEN}unlock${_C_RESET} [minutes]              Request early unlock after cooldown
+  ${_C_GREEN}check${_C_RESET}                         Verify block consistency
+  ${_C_GREEN}history${_C_RESET}                       Show past sessions
+  ${_C_GREEN}uninstall${_C_RESET}                     Remove Piko from your system
 
-Commands:
-  block <minutes> [domains...]  Start a blocking session
-  status                        Show current block status
-  unlock [minutes]              Request early unlock after cooldown
-  check                         Verify block consistency
-  uninstall                     Remove Piko from your system
-
-Options:
+${_C_BOLD}Options:${_C_RESET}
   --version                     Show version
   -h, --help                    Show this help
 
-Run 'piko <command> --help' for details on a command.
+Run ${_C_DIM}piko <command> --help${_C_RESET} for details on a command.
 
-Examples:
+${_C_BOLD}Examples:${_C_RESET}
   piko block 60 instagram.com youtube.com
   piko block --preset social 90
+  piko extend 30
+  piko stats
   piko status
   piko unlock 30
   piko check
+  piko history --week
 EOF
 }
 
@@ -50,6 +58,7 @@ cmd_block() {
     local DOMAINS=()
     local MINUTES=""
     local FORCE=0
+    local DRY_RUN=0
 
     # Scan for early-exit flags first (no root needed)
     for arg in "$@"; do
@@ -72,6 +81,7 @@ Options:
   -p, --preset NAME    Add preset blocklist (can be repeated)
   --list               List available presets
   --force              Replace existing session instead of erroring
+  --dry-run            Show what would be blocked without applying
   -h, --help           Show this help
 
 Examples:
@@ -103,8 +113,12 @@ EOF
                 FORCE=1
                 shift
                 ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
             *)
-                if [ -z "$MINUTES" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                if [ -z "$MINUTES" ] && [[ "$1" =~ ^-?[0-9]+$ ]]; then
                     MINUTES="$1"
                 else
                     DOMAINS+=("$1")
@@ -147,13 +161,14 @@ EOF
     done
 
     # Check for active session
-    if is_active_session && [ "$FORCE" -eq 0 ]; then
+    if is_active_session && [ "$FORCE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
         local unlock_at remaining
         unlock_at=$(cat "$PIKO_UNLOCK_FILE")
         remaining=$(( unlock_at - $(date +%s) ))
         piko_error "already in an active block session ($(fmt_duration "$remaining") remaining)"
         echo ""
         echo "  piko status           # see current session details"
+        echo "  piko extend 30        # extend current session by 30 minutes"
         echo "  piko unlock 30        # request early unlock (30 min cooldown)"
         echo "  piko block --force .. # replace current session"
         exit 1
@@ -177,6 +192,39 @@ EOF
         exit 1
     fi
 
+    # Normalize all domains before any action
+    local NORMALIZED=()
+    for domain in "${DOMAINS[@]}"; do
+        domain=${domain,,}
+        domain=${domain#http://}
+        domain=${domain#https://}
+        domain=${domain%%/*}
+        domain=${domain#www.}
+        [ -z "$domain" ] && continue
+        NORMALIZED+=("$domain")
+    done
+    DOMAINS=("${NORMALIZED[@]}")
+
+    # Dry-run mode: show what would happen and exit
+    if [ "$DRY_RUN" -eq 1 ]; then
+        local browser_count
+        browser_count=$(count_browser_pids)
+        echo ""
+        piko_header "Dry run — no changes will be made"
+        echo ""
+        echo "  ${_C_BOLD}Duration:${_C_RESET}    ${MINUTES} minute$([ "$MINUTES" -ne 1 ] && echo 's')"
+        echo "  ${_C_BOLD}Sites:${_C_RESET}       ${#DOMAINS[@]}"
+        for d in "${DOMAINS[@]}"; do
+            echo "               ${_C_DIM}${d}, www.${d}${_C_RESET}"
+        done
+        echo "  ${_C_BOLD}Hosts:${_C_RESET}       $(( ${#DOMAINS[@]} * 2 )) entries (IPv4 + IPv6)"
+        echo "  ${_C_BOLD}Policies:${_C_RESET}    Firefox, Chrome, Chromium, Brave, Edge"
+        echo "  ${_C_BOLD}DoH:${_C_RESET}         will be disabled in all browsers"
+        echo "  ${_C_BOLD}Browsers:${_C_RESET}    ${browser_count} running (will be restarted)"
+        echo ""
+        exit 0
+    fi
+
     # Need root from here
     check_deps || exit 1
     ensure_root
@@ -189,12 +237,6 @@ EOF
     # Clear and rewrite domains file
     : > "$PIKO_DOMAINS_FILE"
     for domain in "${DOMAINS[@]}"; do
-        # Normalize
-        domain=${domain,,}
-        domain=${domain#http://}
-        domain=${domain#https://}
-        domain=${domain%%/*}
-        domain=${domain#www.}
         [ -z "$domain" ] && continue
 
         # Deduplicate
@@ -235,17 +277,26 @@ EOF
     # Fix file ownership so piko status (no sudo) can read them
     _piko_fix_permissions
 
+    # Log the action
+    local domain_list
+    domain_list=$(sed ':a;N;$!ba;s/\n/,/g' "$PIKO_DOMAINS_FILE")
+    piko_log "INFO" "Session started: ${MINUTES}m, domains: ${domain_list}"
+    piko_history_append "block" "duration=${MINUTES}" "domains=[\"$(sed ':a;N;$!ba;s/\n/\",\"/g' "$PIKO_DOMAINS_FILE")\"]"
+    piko_notify "Piko" "Blocking ${domain_count:-0} sites for ${MINUTES} minutes. Stay focused."
+
     # Print success
     local unlock_at remaining_human domain_count
     unlock_at=$(cat "$PIKO_UNLOCK_FILE")
     remaining_human=$(fmt_time "$unlock_at")
     domain_count=$(wc -l < "$PIKO_DOMAINS_FILE" | tr -d ' ')
 
-    echo "Blocked ${domain_count} site$([ "$domain_count" -ne 1 ] && echo 's') for ${MINUTES} minute$([ "$MINUTES" -ne 1 ] && echo 's') (unlocks at ${remaining_human})"
     echo ""
-    echo "  $(sed ':a;N;$!ba;s/\n/, /g' "$PIKO_DOMAINS_FILE")"
+    piko_success "Blocked ${_C_BOLD}${domain_count}${_C_RESET} site$([ "$domain_count" -ne 1 ] && echo 's') for ${_C_BOLD}${MINUTES}${_C_RESET} minute$([ "$MINUTES" -ne 1 ] && echo 's') ${_C_DIM}(unlocks at ${remaining_human})${_C_RESET}"
     echo ""
-    echo "Your browsers were restarted to apply blocking."
+    echo "  ${_C_DIM}$(sed ':a;N;$!ba;s/\n/, /g' "$PIKO_DOMAINS_FILE")${_C_RESET}"
+    echo ""
+    echo "  Browsers were restarted. DNS-over-HTTPS disabled."
+    echo "  ${_C_DIM}Stay focused.${_C_RESET}"
 }
 
 # ============================================================
@@ -301,11 +352,12 @@ EOF
 
     # Verbose mode
     if ! is_active_session; then
-        echo "No active block session."
         echo ""
-        echo "Start one:"
-        echo "  piko block 60 instagram.com youtube.com"
-        echo "  piko block --preset social"
+        echo "  ${_C_DIM}No active block session.${_C_RESET}"
+        echo ""
+        echo "  Start one:"
+        echo "    piko block 60 instagram.com youtube.com"
+        echo "    piko block --preset social"
         exit 0
     fi
 
@@ -314,24 +366,25 @@ EOF
     now=$(date +%s)
     remaining=$(( unlock_at - now ))
 
+    echo ""
     if [ "$remaining" -le 0 ]; then
-        echo "Block session expired (watchdog will clean up within 60 seconds)."
+        echo "  ${_C_YELLOW}${_C_BOLD}Block session expired${_C_RESET} ${_C_DIM}(watchdog will clean up within 60s)${_C_RESET}"
     else
-        echo "Blocked for $(fmt_duration "$remaining") more (unlocks at $(fmt_time "$unlock_at"))"
+        echo "  ${_C_RED}${_C_BOLD}Blocked${_C_RESET} for ${_C_BOLD}$(fmt_duration "$remaining")${_C_RESET} more ${_C_DIM}(unlocks at $(fmt_time "$unlock_at"))${_C_RESET}"
     fi
 
     echo ""
 
     # Show domains
     if [ -f "$PIKO_DOMAINS_FILE" ]; then
-        echo "Blocked sites: $(sed ':a;N;$!ba;s/\n/, /g' "$PIKO_DOMAINS_FILE")"
+        echo "  ${_C_BOLD}Sites:${_C_RESET}          ${_C_DIM}$(sed ':a;N;$!ba;s/\n/, /g' "$PIKO_DOMAINS_FILE")${_C_RESET}"
     fi
 
     # Browser blocking status
     if browser_policy_active; then
-        echo "Browser blocking: active"
+        echo "  ${_C_BOLD}Browser:${_C_RESET}        ${_C_GREEN}active${_C_RESET} ${_C_DIM}(DoH disabled)${_C_RESET}"
     else
-        echo "Browser blocking: not active"
+        echo "  ${_C_BOLD}Browser:${_C_RESET}        ${_C_YELLOW}not active${_C_RESET}"
     fi
 
     # Coerced unlock status
@@ -340,11 +393,12 @@ EOF
         request_at=$(cat "$PIKO_REQUEST_FILE")
         request_remaining=$(( request_at - now ))
         if [ "$request_remaining" -le 0 ]; then
-            echo "Early unlock: due now (watchdog processing within 60s)"
+            echo "  ${_C_BOLD}Early unlock:${_C_RESET}   ${_C_GREEN}due now${_C_RESET} ${_C_DIM}(watchdog processing within 60s)${_C_RESET}"
         else
-            echo "Early unlock: $(fmt_duration "$request_remaining") of cooldown remaining"
+            echo "  ${_C_BOLD}Early unlock:${_C_RESET}   ${_C_YELLOW}$(fmt_duration "$request_remaining") of cooldown remaining${_C_RESET}"
         fi
     fi
+    echo ""
 }
 
 # ============================================================
@@ -432,9 +486,12 @@ EOF
 
     # Fix permissions
     _piko_fix_permissions
+    piko_log "INFO" "Early unlock requested: ${minutes}m cooldown"
 
-    echo "Early unlock requested with a ${minutes}-minute cooldown."
-    echo "You cannot cancel this. Unlocks at $(fmt_time "$request_at") (may take up to 60 seconds after cooldown)."
+    echo ""
+    piko_success "Early unlock requested ${_C_DIM}(${minutes}-minute cooldown)${_C_RESET}"
+    echo "  ${_C_DIM}You cannot cancel this. Unlocks at $(fmt_time "$request_at").${_C_RESET}"
+    echo ""
 }
 
 cmd_unlock_now() {
@@ -465,7 +522,11 @@ cmd_unlock_now() {
     fi
 
     systemctl try-restart systemd-resolved 2>/dev/null || true
-    echo "All blocks removed."
+    piko_log "INFO" "Emergency unblock performed"
+    piko_history_append "unlock" "method=emergency"
+    echo ""
+    piko_success "All blocks removed."
+    echo ""
 }
 
 # ============================================================
@@ -510,23 +571,24 @@ EOF
     local browser_count
     browser_count=$(count_browser_pids)
 
+    echo ""
     if [ "$active_session" -eq 1 ]; then
         local unlock_at remaining
         unlock_at=$(cat "$PIKO_UNLOCK_FILE" 2>/dev/null)
         remaining=$(( unlock_at - $(date +%s) ))
         if [ "$remaining" -le 0 ]; then
-            echo "Block session: expired (watchdog cleaning up)"
+            echo "  ${_C_BOLD}Session:${_C_RESET}    ${_C_YELLOW}expired${_C_RESET} ${_C_DIM}(watchdog cleaning up)${_C_RESET}"
         else
-            echo "Block session: active ($(fmt_duration "$remaining") remaining)"
+            echo "  ${_C_BOLD}Session:${_C_RESET}    ${_C_RED}active${_C_RESET} ${_C_DIM}($(fmt_duration "$remaining") remaining)${_C_RESET}"
         fi
     else
-        echo "Block session: none"
+        echo "  ${_C_BOLD}Session:${_C_RESET}    ${_C_GREEN}none${_C_RESET}"
     fi
 
-    echo "Hosts blocking: $([ "$hosts_count" -gt 0 ] && echo "active ($hosts_count entries)" || echo "not active")"
-    echo "Browser blocking: $([ "$policy_present" -eq 1 ] && echo "active" || echo "not active")"
-    echo "Early unlock: $([ "$request_pending" -eq 1 ] && echo "requested" || echo "not requested")"
-    echo "Browser processes: $browser_count"
+    echo "  ${_C_BOLD}Hosts:${_C_RESET}      $([ "$hosts_count" -gt 0 ] && echo "${_C_GREEN}active${_C_RESET} ${_C_DIM}($hosts_count entries)${_C_RESET}" || echo "${_C_DIM}not active${_C_RESET}")"
+    echo "  ${_C_BOLD}Browser:${_C_RESET}    $([ "$policy_present" -eq 1 ] && echo "${_C_GREEN}active${_C_RESET}" || echo "${_C_DIM}not active${_C_RESET}")"
+    echo "  ${_C_BOLD}Unlock:${_C_RESET}     $([ "$request_pending" -eq 1 ] && echo "${_C_YELLOW}requested${_C_RESET}" || echo "${_C_DIM}not requested${_C_RESET}")"
+    echo "  ${_C_BOLD}Browsers:${_C_RESET}   ${browser_count} running"
 
     # Drift: active session but no enforcement
     if [ "$active_session" -eq 1 ] && { [ "$hosts_count" -eq 0 ] || [ "$policy_present" -eq 0 ]; }; then
@@ -557,7 +619,7 @@ EOF
     fi
 
     echo ""
-    echo "Everything looks consistent."
+    piko_success "Everything looks consistent."
 }
 
 # ============================================================
@@ -594,11 +656,11 @@ EOF
     "$PIKO_BIN_DIR/piko-browser-guard" clear 2>/dev/null || true
 
     # Stop and remove systemd units (stop service too, not just timer)
-    echo "Stopping watchdog..."
-    systemctl stop piko-watchdog.service 2>/dev/null || true
-    systemctl disable --now piko-watchdog.timer 2>/dev/null || true
-    rm -f /etc/systemd/system/piko-watchdog.timer
-    rm -f /etc/systemd/system/piko-watchdog.service
+    echo "Stopping services..."
+    systemctl stop piko-watchdog.service piko-scheduler.service 2>/dev/null || true
+    systemctl disable --now piko-watchdog.timer piko-scheduler.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/piko-watchdog.timer /etc/systemd/system/piko-scheduler.timer
+    rm -f /etc/systemd/system/piko-watchdog.service /etc/systemd/system/piko-scheduler.service
     systemctl daemon-reload
 
     # Remove symlink
@@ -622,11 +684,432 @@ EOF
 }
 
 # ============================================================
+# Command: extend
+# ============================================================
+
+cmd_extend() {
+    local minutes=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
+Usage: piko extend <minutes>
+
+Extend the current blocking session without restarting browsers.
+
+Arguments:
+  minutes       Additional time to add (in minutes)
+
+Examples:
+  piko extend 30       # Add 30 more minutes
+  piko extend 60       # Add another hour
+EOF
+                exit 0
+                ;;
+            *)
+                if [ -z "$minutes" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                    minutes="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$minutes" ]; then
+        piko_error "specify how many minutes to add"
+        echo ""
+        echo "  piko extend 30"
+        exit 1
+    fi
+
+    if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -le 0 ]; then
+        piko_error "duration must be a positive number"
+        exit 1
+    fi
+
+    if ! is_active_session; then
+        echo ""
+        echo "  ${_C_DIM}No active block session to extend.${_C_RESET}"
+        echo ""
+        echo "  Start one: piko block 60 instagram.com"
+        exit 0
+    fi
+
+    ensure_root
+
+    local current_unlock_at new_unlock_at
+    current_unlock_at=$(cat "$PIKO_UNLOCK_FILE")
+    new_unlock_at=$(( current_unlock_at + minutes * 60 ))
+    printf '%s\n' "$new_unlock_at" > "$PIKO_UNLOCK_FILE"
+
+    _piko_fix_permissions
+    piko_log "INFO" "Session extended by ${minutes} minutes"
+    piko_history_append "extend" "minutes=${minutes}"
+    piko_notify "Piko" "Session extended by ${minutes} minutes. Unlocks at $(fmt_time "$new_unlock_at")."
+
+    echo ""
+    piko_success "Extended by ${_C_BOLD}${minutes}${_C_RESET} minute$([ "$minutes" -ne 1 ] && echo 's') ${_C_DIM}(now unlocks at $(fmt_time "$new_unlock_at"))${_C_RESET}"
+    echo ""
+}
+
+# ============================================================
+# Command: history
+# ============================================================
+
+cmd_history() {
+    local mode="10"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -n)
+                mode="$2"
+                shift 2
+                ;;
+            --week)
+                mode="-week"
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: piko history [options]
+
+Show past blocking sessions.
+
+Options:
+  -n COUNT       Show last COUNT entries (default: 10)
+  --week         Show summary for the last 7 days
+  -h, --help     Show this help
+
+Examples:
+  piko history          # show recent sessions
+  piko history --week   # weekly summary
+  piko history -n 20    # last 20 entries
+EOF
+                exit 0
+                ;;
+            *) shift ;;
+        esac
+    done
+
+    if [ ! -f "$PIKO_HISTORY_FILE" ]; then
+        echo ""
+        echo "  ${_C_DIM}No history yet.${_C_RESET}"
+        echo ""
+        echo "  Start a session: piko block 60 instagram.com"
+        exit 0
+    fi
+
+    echo ""
+    python3 - "$PIKO_HISTORY_FILE" "$mode" <<'PY'
+import json, sys
+from datetime import datetime, timedelta
+from collections import Counter
+
+path = sys.argv[1]
+mode = sys.argv[2]
+
+entries = []
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+if not entries:
+    print("  No history yet.")
+    sys.exit(0)
+
+if mode == "-week":
+    cutoff = int((datetime.now() - timedelta(days=7)).timestamp())
+    week = [e for e in entries if e.get("ts", 0) >= cutoff]
+    blocks = [e for e in week if e.get("action") == "block"]
+    total_min = sum(int(e.get("duration", 0)) for e in blocks)
+    hours = total_min // 60
+    mins = total_min % 60
+    extends = [e for e in week if e.get("action") == "extend"]
+    ext_min = sum(int(e.get("minutes", 0)) for e in extends)
+    total_min += ext_min
+    print(f"  \033[1mLast 7 days\033[0m")
+    print(f"")
+    print(f"  Sessions:    {len(blocks)}")
+    print(f"  Focus time:  {hours}h {mins}m")
+    if ext_min > 0:
+        print(f"  Extended:    +{ext_min}m across {len(extends)} extension(s)")
+    if blocks:
+        all_domains = []
+        for e in blocks:
+            d = e.get("domains", "")
+            if isinstance(d, list):
+                all_domains.extend(d)
+            elif isinstance(d, str) and d:
+                all_domains.extend(d.split(","))
+        if all_domains:
+            top = Counter(all_domains).most_common(5)
+            print(f"  Top sites:   {', '.join(d for d, _ in top)}")
+else:
+    n = int(mode)
+    recent = entries[-n:]
+    for e in reversed(recent):
+        ts = datetime.fromtimestamp(e.get("ts", 0)).strftime("%b %d %H:%M")
+        action = e.get("action", "?")
+        if action == "block":
+            duration = e.get("duration", "?")
+            domains = e.get("domains", "")
+            if isinstance(domains, list):
+                display = ", ".join(domains[:3])
+                if len(domains) > 3:
+                    display += f" +{len(domains)-3} more"
+            else:
+                display = str(domains)
+            print(f"  \033[2m{ts}\033[0m  \033[1mblock\033[0m {duration}m  \033[2m{display}\033[0m")
+        elif action == "unlock":
+            print(f"  \033[2m{ts}\033[0m  \033[32munlock\033[0m")
+        elif action == "extend":
+            mins = e.get("minutes", "?")
+            print(f"  \033[2m{ts}\033[0m  \033[36mextend\033[0m +{mins}m")
+        else:
+            print(f"  \033[2m{ts}\033[0m  {action}")
+PY
+    echo ""
+}
+
+# ============================================================
+# Command: schedule
+# ============================================================
+
+cmd_schedule() {
+    local action="${1:-list}"
+    shift || true
+
+    local schedule_file="$PIKO_STATE_DIR/schedules.json"
+
+    if [ "$action" = "list" ] || [ "$action" = "-h" ] || [ "$action" = "--help" ]; then
+        if [ "$action" = "-h" ] || [ "$action" = "--help" ]; then
+            cat <<'EOF'
+Usage: piko schedule [action] [options]
+
+Manage automated blocking schedules.
+
+Actions:
+  list              List all schedules (default)
+  add               Add a new schedule
+  remove <name>     Remove a schedule
+
+Examples:
+  piko schedule add --name "Morning Focus" --days "Mon,Tue,Wed,Thu,Fri" --time "09:00" --duration 120 --preset work
+  piko schedule remove "Morning Focus"
+  piko schedule list
+EOF
+            exit 0
+        fi
+
+        if [ ! -f "$schedule_file" ]; then
+            echo ""
+            echo "  ${_C_DIM}No schedules defined.${_C_RESET}"
+            echo ""
+            exit 0
+        fi
+
+        echo ""
+        echo "  ${_C_BOLD}Active Schedules:${_C_RESET}"
+        echo ""
+        python3 - "$schedule_file" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        schedules = json.load(f)
+    if not schedules:
+        print("  \033[2mNo schedules defined.\033[0m")
+    for s in schedules:
+        days = ", ".join(s.get('days', []))
+        preset_info = f" (preset: {s.get('preset')})" if s.get('preset') else ""
+        print(f"  \033[36m{s.get('name')}\033[0m")
+        print(f"    {days} @ {s.get('time')} for {s.get('duration')}m{preset_info}")
+        print()
+except Exception as e:
+    print(f"  Error reading schedules: {e}")
+PY
+        exit 0
+    fi
+
+    if [ "$action" = "add" ]; then
+        local name="" days="" time="" duration="" preset=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --name) name="$2"; shift 2 ;;
+                --days) days="$2"; shift 2 ;;
+                --time) time="$2"; shift 2 ;;
+                --duration) duration="$2"; shift 2 ;;
+                --preset) preset="$2"; shift 2 ;;
+                *) piko_error "Unknown option: $1"; exit 1 ;;
+            esac
+        done
+
+        if [ -z "$name" ] || [ -z "$days" ] || [ -z "$time" ] || [ -z "$duration" ]; then
+            piko_error "Missing required arguments for schedule add."
+            echo "Required: --name, --days, --time, --duration"
+            exit 1
+        fi
+
+        mkdir -p "$PIKO_STATE_DIR"
+        [ ! -f "$schedule_file" ] && echo "[]" > "$schedule_file"
+
+        python3 - "$schedule_file" "$name" "$days" "$time" "$duration" "$preset" <<'PY'
+import json, sys
+path, name, days, time, duration, preset = sys.argv[1:7]
+days_list = [d.strip().capitalize()[:3] for d in days.split(",")]
+
+with open(path, "r") as f:
+    schedules = json.load(f)
+
+# Update existing or append new
+found = False
+for s in schedules:
+    if s["name"] == name:
+        s.update({"days": days_list, "time": time, "duration": int(duration), "preset": preset if preset else None})
+        found = True
+        break
+if not found:
+    schedules.append({"name": name, "days": days_list, "time": time, "duration": int(duration), "preset": preset if preset else None})
+
+with open(path, "w") as f:
+    json.dump(schedules, f, indent=2)
+PY
+        _piko_fix_permissions
+        piko_success "Schedule '${name}' added."
+        exit 0
+    fi
+
+    if [ "$action" = "remove" ]; then
+        local name="$1"
+        if [ -z "$name" ]; then
+            piko_error "Specify schedule name to remove"
+            exit 1
+        fi
+        
+        if [ ! -f "$schedule_file" ]; then
+            piko_error "No schedules exist"
+            exit 1
+        fi
+
+        if python3 - "$schedule_file" "$name" <<'PY'; then
+import json, sys
+path, name = sys.argv[1:3]
+with open(path, "r") as f:
+    schedules = json.load(f)
+
+filtered = [s for s in schedules if s["name"] != name]
+if len(filtered) == len(schedules):
+    print(f"Schedule '{name}' not found.")
+    sys.exit(1)
+
+with open(path, "w") as f:
+    json.dump(filtered, f, indent=2)
+PY
+            piko_success "Schedule '${name}' removed."
+        fi
+        exit 0
+    fi
+
+    piko_error "Unknown schedule action: $action"
+    exit 1
+}
+
+# ============================================================
+# Command: stats
+# ============================================================
+
+cmd_stats() {
+    if [ ! -f "$PIKO_HISTORY_FILE" ]; then
+        echo ""
+        echo "  ${_C_DIM}No history yet. Start a session to see stats.${_C_RESET}"
+        echo ""
+        exit 0
+    fi
+
+    echo ""
+    python3 - "$PIKO_HISTORY_FILE" <<'PY'
+import json, sys
+from datetime import datetime, timedelta
+from collections import Counter
+
+path = sys.argv[1]
+
+entries = []
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+if not entries:
+    print("  \033[2mNo history yet.\033[0m")
+    sys.exit(0)
+
+# Aggregation logic
+blocks = [e for e in entries if e.get("action") == "block"]
+extends = [e for e in entries if e.get("action") == "extend"]
+
+total_min = sum(int(e.get("duration", 0)) for e in blocks) + sum(int(e.get("minutes", 0)) for e in extends)
+hours = total_min // 60
+mins = total_min % 60
+
+# Domains blocked
+all_domains = []
+for e in blocks:
+    d = e.get("domains", "")
+    if isinstance(d, list):
+        all_domains.extend(d)
+    elif isinstance(d, str) and d:
+        all_domains.extend(d.split(","))
+top_domains = Counter(all_domains).most_common(5)
+
+# Calculate streak (days in a row with at least one block)
+dates_with_blocks = set(datetime.fromtimestamp(e.get("ts")).date() for e in blocks)
+streak = 0
+today = datetime.now().date()
+while (today - timedelta(days=streak)) in dates_with_blocks:
+    streak += 1
+
+# If streak is 0, check if they had a streak ending yesterday
+if streak == 0:
+    temp_streak = 0
+    while (today - timedelta(days=temp_streak+1)) in dates_with_blocks:
+        temp_streak += 1
+    streak_msg = f"{temp_streak} days (ended yesterday)" if temp_streak > 0 else "0 days"
+else:
+    streak_msg = f"{streak} days 🔥"
+
+# Print dashboard
+print(f"  \033[1mPiko Focus Statistics\033[0m")
+print(f"  \033[2m─────────────────────\033[0m")
+print()
+print(f"  \033[1mAll-Time Focus:\033[0m  {hours}h {mins}m")
+print(f"  \033[1mTotal Sessions:\033[0m  {len(blocks)}")
+print(f"  \033[1mCurrent Streak:\033[0m  {streak_msg}")
+print()
+if top_domains:
+    print(f"  \033[1mMost Blocked Sites:\033[0m")
+    for d, count in top_domains:
+        bar = "█" * min(20, int((count / len(blocks)) * 20))
+        print(f"    {d:<20} \033[36m{bar}\033[0m ({count})")
+PY
+    echo ""
+}
+
+# ============================================================
 # Main dispatch
 # ============================================================
 
 if [ "${1:-}" = "--version" ]; then
-    echo "piko ${PIKO_VERSION}"
+    echo "${_C_BOLD}piko${_C_RESET} ${_C_DIM}${PIKO_VERSION}${_C_RESET}"
     exit 0
 fi
 
@@ -635,9 +1118,13 @@ shift || true
 
 case "$COMMAND" in
     block)      cmd_block "$@" ;;
+    extend)     cmd_extend "$@" ;;
+    schedule)   cmd_schedule "$@" ;;
     status)     cmd_status "$@" ;;
+    stats)      cmd_stats "$@" ;;
     unlock)     cmd_unlock "$@" ;;
     check)      cmd_check "$@" ;;
+    history)    cmd_history "$@" ;;
     uninstall)  cmd_uninstall "$@" ;;
     help|-h|--help|"") cmd_help; exit 0 ;;
     *) piko_error "unknown command '$COMMAND'"; echo ""; cmd_help >&2; exit 1 ;;

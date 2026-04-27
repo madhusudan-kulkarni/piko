@@ -48,7 +48,7 @@ Removes `~/.piko/`, the symlink, systemd units, and sudoers rules. Clean.
 Piko enforces blocks through three simultaneous layers:
 
 1. **`/etc/hosts`** — Blocked domains are redirected to `127.0.0.1`. The hosts file is locked with `chattr +i` (immutable), preventing edits even with `sudo`.
-2. **Browser policies** — Firefox and Chrome/Chromium managed policies are deployed to block domains at the browser level. This catches attempts to bypass `/etc/hosts` (e.g., using a different DNS resolver).
+2. **Browser policies** — Firefox, Chrome, Chromium, Brave, and Edge managed policies are deployed to block domains and disable DNS-over-HTTPS (DoH) at the browser level. This catches attempts to bypass `/etc/hosts` via alternative DNS resolvers.
 3. **Watchdog timer** — A systemd timer (`piko-watchdog.timer`) runs every 60 seconds, checking whether the session has expired. When time is up, it automatically removes all blocks by reversing the three layers above. The watchdog also cycles browser processes on lock/unlock so policy changes take effect immediately.
 
 The complete flow of a session:
@@ -79,14 +79,30 @@ piko block 60 instagram.com youtube.com
 piko block --preset social 90
 piko block -p social -p news 30
 
+# Preview what would be blocked
+piko block --dry-run 60 --preset social
+
 # List available presets
 piko block --list
+
+# Extend current session (no browser restart)
+piko extend 30
+
+# View focus history and stats
+piko history --week
+piko stats
+
+# Set up automated schedules
+piko schedule add --name "Morning Focus" --days "Mon,Tue,Wed,Thu,Fri" --time "09:00" --duration 120 --preset work
 
 # Check if blocked
 piko status
 
 # Verify consistency
 piko check
+
+# View focus history
+piko history --week
 
 # Request early unlock (30-minute cooldown, cannot be cancelled)
 piko unlock 30
@@ -101,12 +117,26 @@ piko block <minutes> [domains...]   Start a blocking session
   -p, --preset NAME                 Add preset blocklist (repeatable)
   --list                            List available presets
   --force                           Replace existing session
+  --dry-run                         Show what would be blocked
+
+piko extend <minutes>               Extend current session (no browser restart)
 
 piko status                         Show current block status
   -q, --quiet                       Exit code only (0=unblocked, 1=blocked)
 
+piko stats                          Show beautiful focus statistics
+
+piko schedule [action]              Manage automated blocking schedules
+  list                              List all schedules
+  add                               Add a new schedule
+  remove <name>                     Remove a schedule
+
 piko unlock [minutes]               Request early unlock (coerced cooldown)
   --now                             Emergency immediate unblock (root password)
+
+piko history                        Show past blocking sessions
+  --week                            Weekly summary with focus time stats
+  -n COUNT                          Show last COUNT entries
 
 piko check                          Verify block consistency
 piko uninstall                      Remove Piko from your system
@@ -214,12 +244,13 @@ System paths (required for functionality):
 | `/etc/sudoers.d/piko` | Sudo rule (blocks `chattr` for the user) |
 | `/etc/hosts` | Modified during sessions (locked with `chattr +i`) |
 | `/etc/firefox/policies/`, `/etc/opt/chrome/`, `/etc/chromium/` | Browser policy files |
+| `/etc/brave/policies/`, `/etc/opt/edge/` | Additional browser policy files |
 
 ## Limitations
 
 - Piko is high-friction, not mathematically unbypassable.
 - If a user keeps broad `sudo`/root powers, bypass is always possible.
-- Only Firefox and Chrome/Chromium receive browser policy blocks. Other browsers rely solely on `/etc/hosts`.
+- Firefox, Chrome, Chromium, Brave, and Edge receive browser policy blocks (including DoH disabling). Other browsers rely solely on `/etc/hosts`.
 - Browser policy changes are most reliable when browsers are restarted; Piko cycles browser processes on lock/unlock for this reason.
 
 ## License

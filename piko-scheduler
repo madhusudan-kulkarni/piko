@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import json
+import sys
+import os
+import subprocess
+from datetime import datetime
+
+PIKO_HOME = os.environ.get("PIKO_HOME", "/root/.piko")
+if "SUDO_USER" in os.environ:
+    import pwd
+    PIKO_HOME = os.path.expanduser(f"~{os.environ['SUDO_USER']}/.piko")
+
+SCHEDULE_FILE = os.path.join(PIKO_HOME, "state", "schedules.json")
+PIKO_BIN = os.path.join(PIKO_HOME, "bin", "piko")
+PIKO_UNLOCK_FILE = os.path.join(PIKO_HOME, "state", "unlock_at")
+
+def is_active_session():
+    if not os.path.exists(PIKO_UNLOCK_FILE):
+        return False
+    try:
+        with open(PIKO_UNLOCK_FILE, "r") as f:
+            unlock_at = int(f.read().strip())
+            return datetime.now().timestamp() < unlock_at
+    except Exception:
+        return False
+
+def run_schedule():
+    if not os.path.exists(SCHEDULE_FILE):
+        return
+
+    try:
+        with open(SCHEDULE_FILE, "r") as f:
+            schedules = json.load(f)
+    except Exception as e:
+        print(f"Error reading schedules: {e}")
+        return
+
+    now = datetime.now()
+    current_day = now.strftime("%a")[:3] # Mon, Tue, etc.
+    current_time = now.strftime("%H:%M")
+
+    for sched in schedules:
+        days = sched.get("days", [])
+        time = sched.get("time")
+        duration = sched.get("duration", 60)
+        preset = sched.get("preset")
+
+        if current_day in days and current_time == time:
+            if is_active_session():
+                print(f"Skipping schedule '{sched.get('name')}', session already active.")
+                continue
+            
+            print(f"Triggering schedule '{sched.get('name')}'")
+            cmd = [PIKO_BIN, "block", str(duration)]
+            if preset:
+                cmd.extend(["--preset", preset])
+            
+            subprocess.run(cmd)
+
+if __name__ == "__main__":
+    run_schedule()

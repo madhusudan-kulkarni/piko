@@ -27,11 +27,11 @@ sed -i '/# piko:/d' /etc/hosts
 "$PIKO_BIN_DIR/piko-browser-guard" clear 2>/dev/null || true
 
 # Stop watchdog service AND timer, then remove systemd units
-echo "Stopping watchdog..."
-systemctl stop piko-watchdog.service 2>/dev/null || true
-systemctl disable --now piko-watchdog.timer 2>/dev/null || true
-rm -f /etc/systemd/system/piko-watchdog.timer
-rm -f /etc/systemd/system/piko-watchdog.service
+echo "Stopping services..."
+systemctl stop piko-watchdog.service piko-scheduler.service 2>/dev/null || true
+systemctl disable --now piko-watchdog.timer piko-scheduler.timer 2>/dev/null || true
+rm -f /etc/systemd/system/piko-watchdog.timer /etc/systemd/system/piko-scheduler.timer
+rm -f /etc/systemd/system/piko-watchdog.service /etc/systemd/system/piko-scheduler.service
 systemctl daemon-reload
 
 # Remove symlink

@@ -1,0 +1,10 @@
+[Unit]
+Description=Piko automated blocking scheduler
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=__PIKO_HOME__/bin/piko-scheduler
+Environment="PIKO_HOME=__PIKO_HOME__"
+User=__PIKO_USER__
+Group=__PIKO_USER__

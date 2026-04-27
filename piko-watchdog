@@ -36,6 +36,9 @@ if [ "$SHOULD_UNLOCK" -eq 1 ]; then
     "$PIKO_BIN_DIR/piko-browser-cycle" unlock || logger "Piko: browser cycle unlock failed"
     systemctl try-restart systemd-resolved 2>/dev/null || true
     _piko_fix_permissions
+    piko_log "INFO" "Session ended (watchdog unlocked)"
+    piko_history_append "unlock"
+    piko_notify "Piko" "Your focus session has ended. Sites unblocked."
     logger "Piko: session ended, hosts file unblocked"
 else
     chattr -i "$PIKO_HOSTS" 2>/dev/null || true
