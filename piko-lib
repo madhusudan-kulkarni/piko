@@ -3,7 +3,7 @@
 # Not meant to be executed directly
 # shellcheck disable=SC2034
 
-PIKO_VERSION="1.1.0"
+PIKO_VERSION="1.2.0"
 
 # --- Resolve the Piko home directory ---
 # Resolution order:
