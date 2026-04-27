@@ -52,12 +52,14 @@ mkdir -p "$PIKO_BIN_DIR"
 mkdir -p "$PIKO_STATE_DIR"
 mkdir -p "$PIKO_COMPLETIONS_DIR"
 
-# Install binaries
-install -m 755 "$SCRIPT_DIR/piko" "$PIKO_BIN_DIR/piko"
-install -m 644 "$SCRIPT_DIR/piko-lib" "$PIKO_BIN_DIR/piko-lib"
-install -m 700 "$SCRIPT_DIR/piko-browser-guard" "$PIKO_BIN_DIR/piko-browser-guard"
-install -m 700 "$SCRIPT_DIR/piko-browser-cycle" "$PIKO_BIN_DIR/piko-browser-cycle"
-install -m 700 "$SCRIPT_DIR/piko-watchdog" "$PIKO_BIN_DIR/piko-watchdog"
+# Copy core scripts
+cp "$SCRIPT_DIR/piko" "$PIKO_BIN_DIR/piko"
+cp "$SCRIPT_DIR/piko-lib" "$PIKO_BIN_DIR/piko-lib"
+cp "$SCRIPT_DIR/piko-watchdog" "$PIKO_BIN_DIR/piko-watchdog"
+cp "$SCRIPT_DIR/piko-scheduler" "$PIKO_BIN_DIR/piko-scheduler"
+cp "$SCRIPT_DIR/piko-browser-guard" "$PIKO_BIN_DIR/piko-browser-guard"
+cp "$SCRIPT_DIR/piko-browser-cycle" "$PIKO_BIN_DIR/piko-browser-cycle"
+chmod +x "$PIKO_BIN_DIR"/piko*
 
 # Set ownership to the real user
 chown -R "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "$PIKO_HOME"
@@ -75,7 +77,7 @@ if [ ! -f "$PIKO_CONFIG" ] && [ -f "$SCRIPT_DIR/pikorc.template" ]; then
 fi
 
 # Write version and owner files
-echo "1.0.0" > "$PIKO_STATE_DIR/version"
+echo "1.1.0" > "$PIKO_STATE_DIR/version"
 echo "$CURRENT_USERNAME" > "$PIKO_STATE_DIR/owner"
 chown "${CURRENT_USERNAME}:${CURRENT_USERNAME}" "$PIKO_STATE_DIR/version" "$PIKO_STATE_DIR/owner"
 
@@ -104,16 +106,25 @@ sed -e "s|__PIKO_HOME__|${PIKO_HOME}|g" \
     -e "s|__PIKO_USER__|${CURRENT_USERNAME}|g" \
     "$SCRIPT_DIR/piko-watchdog.service.in" > /etc/systemd/system/piko-watchdog.service
 
+sed -e "s|__PIKO_HOME__|${PIKO_HOME}|g" \
+    -e "s|__PIKO_USER__|${CURRENT_USERNAME}|g" \
+    "$SCRIPT_DIR/piko-scheduler.service.in" > /etc/systemd/system/piko-scheduler.service
+
 install -m 644 "$SCRIPT_DIR/piko-watchdog.timer" /etc/systemd/system/piko-watchdog.timer
+install -m 644 "$SCRIPT_DIR/piko-scheduler.timer" /etc/systemd/system/piko-scheduler.timer
 
 systemctl daemon-reload
 systemctl enable --now piko-watchdog.timer
+systemctl enable --now piko-scheduler.timer
 
-# Set up sudoers — block chattr at all common paths
-SUDOERS_LINE="$CURRENT_USERNAME ALL=(ALL) ALL, !/usr/bin/chattr, !/sbin/chattr, !/usr/sbin/chattr"
+# Set up sudoers — block chattr to prevent bypass of immutable hosts file
+# IMPORTANT: This only RESTRICTS chattr, it does NOT grant any new permissions.
+# The user's existing sudo configuration is preserved.
 EDITOR='tee' visudo -f /etc/sudoers.d/piko >/dev/null <<EOF
-# Allow the current user full sudo EXCEPT chattr
-$SUDOERS_LINE
+# Piko: prevent user from directly invoking chattr to bypass hosts file lock.
+# This does NOT grant any new sudo privileges; it only adds a restriction.
+# The user's existing sudo access (from /etc/sudoers or other files) is unaffected.
+$CURRENT_USERNAME ALL=(ALL) !/usr/bin/chattr, !/sbin/chattr, !/usr/sbin/chattr
 EOF
 visudo -cf /etc/sudoers.d/piko >/dev/null
 

@@ -5,7 +5,7 @@ _piko() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="block status unlock check uninstall help"
+    commands="block extend status unlock check history uninstall help"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -24,7 +24,7 @@ _piko() {
                     ;;
             esac
 
-            COMPREPLY=($(compgen -W "-p --preset --list --force -h --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "-p --preset --list --force --dry-run -h --help" -- "$cur"))
 
             # Suggest common durations if current word looks numeric
             if [[ "$cur" =~ ^[0-9]*$ ]] && [ -n "$cur" ]; then
@@ -43,6 +43,15 @@ _piko() {
             ;;
         check|uninstall|help)
             COMPREPLY=($(compgen -W "-h --help" -- "$cur"))
+            ;;
+        extend)
+            COMPREPLY=($(compgen -W "-h --help" -- "$cur"))
+            if [[ "$cur" =~ ^[0-9]*$ ]] && [ -n "$cur" ]; then
+                COMPREPLY+=($(compgen -W "15 30 60 90" -- "$cur"))
+            fi
+            ;;
+        history)
+            COMPREPLY=($(compgen -W "-n --week -h --help" -- "$cur"))
             ;;
     esac
 

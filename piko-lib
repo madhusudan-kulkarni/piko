@@ -3,7 +3,7 @@
 # Not meant to be executed directly
 # shellcheck disable=SC2034
 
-PIKO_VERSION="1.0.0"
+PIKO_VERSION="1.1.0"
 
 # --- Resolve the Piko home directory ---
 # Resolution order:
@@ -41,6 +41,9 @@ PIKO_LAST_UNLOCK_FILE="$PIKO_STATE_DIR/last_unlock_at"
 PIKO_VERSION_FILE="$PIKO_STATE_DIR/version"
 PIKO_OWNER_FILE="$PIKO_STATE_DIR/owner"
 PIKO_CONFIG="$PIKO_HOME/config"
+PIKO_HISTORY_FILE="$PIKO_STATE_DIR/history.jsonl"
+PIKO_LOG_FILE="$PIKO_STATE_DIR/piko.log"
+PIKO_SCHEDULE_DIR="$PIKO_STATE_DIR/schedules"
 
 # Browser policy paths (system-level, not movable)
 PIKO_FIREFOX_POLICY_DIR="/etc/firefox/policies"
@@ -51,7 +54,27 @@ PIKO_CHROME_POLICY_FILE="/etc/opt/chrome/policies/managed/piko-blocklist.json"
 PIKO_CHROMIUM_POLICY_FILE="/etc/chromium/policies/managed/piko-blocklist.json"
 
 # Browser process names to detect and cycle
-PIKO_BROWSERS=(firefox firefox-bin google-chrome google-chrome-stable chromium chromium-browser)
+PIKO_BROWSERS=(firefox firefox-bin google-chrome google-chrome-stable chromium chromium-browser brave brave-browser vivaldi vivaldi-stable microsoft-edge microsoft-edge-stable)
+
+# Chromium-based browser policy paths (for Brave, Vivaldi, Edge)
+PIKO_BRAVE_POLICY_FILE="/etc/brave/policies/managed/piko-blocklist.json"
+PIKO_EDGE_POLICY_FILE="/etc/opt/edge/policies/managed/piko-blocklist.json"
+
+# --- Colors (respect NO_COLOR: https://no-color.org/) ---
+# shellcheck disable=SC2034
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    _C_RED=$'\033[0;31m'
+    _C_GREEN=$'\033[0;32m'
+    _C_YELLOW=$'\033[0;33m'
+    _C_BLUE=$'\033[0;34m'
+    _C_CYAN=$'\033[0;36m'
+    _C_BOLD=$'\033[1m'
+    _C_DIM=$'\033[2m'
+    _C_RESET=$'\033[0m'
+else
+    _C_RED="" _C_GREEN="" _C_YELLOW="" _C_BLUE=""
+    _C_CYAN="" _C_BOLD="" _C_DIM="" _C_RESET=""
+fi
 
 # --- Real user detection ---
 # Reads from PIKO_OWNER_FILE first (works when running via systemd with no SUDO_USER),
@@ -154,15 +177,77 @@ PY
 # --- Output helpers ---
 
 piko_info() {
-    echo "  $*"
+    echo "  ${_C_DIM}$*${_C_RESET}"
 }
 
 piko_warn() {
-    echo "[piko] warning: $*" >&2
+    echo "${_C_YELLOW}${_C_BOLD}[piko]${_C_RESET} ${_C_YELLOW}warning:${_C_RESET} $*" >&2
 }
 
 piko_error() {
-    echo "[piko] $*" >&2
+    echo "${_C_RED}${_C_BOLD}[piko]${_C_RESET} ${_C_RED}$*${_C_RESET}" >&2
+}
+
+piko_success() {
+    echo "${_C_GREEN}${_C_BOLD}✓${_C_RESET} $*"
+}
+
+piko_header() {
+    echo "${_C_BOLD}$*${_C_RESET}"
+}
+
+# --- Logging ---
+
+piko_log() {
+    local level="$1"
+    shift
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    mkdir -p "$PIKO_STATE_DIR" 2>/dev/null || true
+    printf '[%s] %-5s %s\n' "$timestamp" "$level" "$*" >> "$PIKO_LOG_FILE" 2>/dev/null || true
+}
+
+# --- Desktop notifications ---
+
+piko_notify() {
+    local title="${1:-Piko}"
+    local body="${2:-}"
+    local piko_user
+    piko_user=$(_piko_real_user)
+    [ "$piko_user" = "root" ] && return 0
+    local uid
+    uid=$(id -u "$piko_user" 2>/dev/null) || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    sudo -u "$piko_user" \
+        DISPLAY=:0 \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+        notify-send "$title" "$body" --icon=dialog-information 2>/dev/null || true
+}
+
+# --- Session history ---
+
+piko_history_append() {
+    local action="$1"
+    shift
+    local timestamp
+    timestamp=$(date +%s)
+    mkdir -p "$PIKO_STATE_DIR" 2>/dev/null || true
+    # Build JSON entry via python for safety
+    python3 - "$PIKO_HISTORY_FILE" "$timestamp" "$action" "$@" 2>/dev/null <<'PY' || true
+import json, sys, os
+path = sys.argv[1]
+entry = {"ts": int(sys.argv[2]), "action": sys.argv[3]}
+for arg in sys.argv[4:]:
+    if "=" in arg:
+        k, v = arg.split("=", 1)
+        try:
+            entry[k] = json.loads(v)
+        except (json.JSONDecodeError, ValueError):
+            entry[k] = v
+with open(path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+PY
+    _piko_fix_permissions 2>/dev/null || true
 }
 
 # --- Formatting ---

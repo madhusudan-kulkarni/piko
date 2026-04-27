@@ -5,6 +5,8 @@ PIKO_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[
 PIKO_LIB_DIR="$(cd "$(dirname "$PIKO_SELF")" && pwd)"
 source "${PIKO_LIB_DIR}/piko-lib"
 
+GRACE_SECONDS=5
+
 usage() {
     echo "Usage: piko-browser-cycle <lock|unlock>"
 }
@@ -36,13 +38,37 @@ if [ -z "$PIDS" ]; then
     exit 0
 fi
 
-logger "Piko: browser cycle($MODE) started"
+PID_COUNT=$(echo "$PIDS" | wc -l | tr -d ' ')
+logger "Piko: browser cycle($MODE) started — $PID_COUNT browser process(es)"
 
+# --- Graceful warning before killing ---
+# Give users a few seconds to save their work.
+if [ "$MODE" = "lock" ]; then
+    piko_notify "Piko" "Browsers will restart in ${GRACE_SECONDS}s to apply blocking. Save your work."
+else
+    piko_notify "Piko" "Browsers will restart in ${GRACE_SECONDS}s to clear blocking."
+fi
+sleep "$GRACE_SECONDS"
+
+# Re-collect PIDs (some may have closed voluntarily after notification)
+PIDS=$(collect_pids)
+if [ -z "$PIDS" ]; then
+    logger "Piko: browser cycle($MODE) all browsers closed voluntarily"
+    if [ "$MODE" = "unlock" ]; then
+        mkdir -p "$PIKO_STATE_DIR"
+        date +%s > "$PIKO_LAST_UNLOCK_FILE"
+        _piko_fix_permissions
+    fi
+    exit 0
+fi
+
+# Send SIGTERM (graceful close)
 while IFS= read -r pid; do
     [ -z "$pid" ] && continue
     kill -TERM "$pid" 2>/dev/null || true
 done <<< "$PIDS"
 
+# Wait up to 8 seconds for graceful shutdown
 for _ in 1 2 3 4 5 6 7 8; do
     sleep 1
     REMAINING=""
@@ -64,6 +90,7 @@ for _ in 1 2 3 4 5 6 7 8; do
     fi
 done
 
+# Force-kill remaining processes
 while IFS= read -r pid; do
     [ -z "$pid" ] && continue
     kill -KILL "$pid" 2>/dev/null || true

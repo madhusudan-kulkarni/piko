@@ -1,0 +1,10 @@
+[Unit]
+Description=Piko automated blocking scheduler timer
+
+[Timer]
+# Run at the top of every minute
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
